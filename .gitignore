@@ -1,0 +1,46 @@
+# Build outputs
+/omac
+/dist/
+/build/
+*.exe
+*.test
+*.out
+
+# Go toolchain caches (only present when building inside this dir)
+/.gocache/
+/.gomodcache/
+
+# Test outputs
+/coverage.out
+/coverage.html
+/.ruff_cache/
+
+# Per-workdir runtime state managed by `omac register` / `omac start`.
+# The registry file itself may be committed per-project (it's small and
+# meant to be reviewable), but the flock and any stray temp files should
+# not be.
+/.opencode/sidecar.json.lock
+/.opencode/sidecar.json.tmp-*
+
+# Runtime state directory (created by `omac start`; the actual path lives
+# under $TMPDIR, but keep a guard here in case the user overrides TMPDIR
+# into the project).
+/omac-*/
+
+# Python artifacts (the example skill's sidecar.py is checked in, but its
+# compile cache is not).
+__pycache__/
+*.pyc
+*.pyo
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editors
+*.swp
+*.swo
+.idea/
+.vscode/
+*~
