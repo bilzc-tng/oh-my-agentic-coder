@@ -29,7 +29,8 @@ import (
 // Inputs captures everything needed to expand a sandbox profile.
 type Inputs struct {
 	Workdir  string
-	Socket   string
+	Socket   string   // bridge.sock path (Unix transport)
+	TCPPort  int      // bound 127.0.0.1 port (TCP transport); 0 disables {{tcp_port}}
 	Mounts   []string // skill mount names
 	InnerCmd []string // [cmd, args...] — InnerCmd[0] is {{inner_cmd}}; rest is {{inner_args}}
 }
@@ -64,6 +65,7 @@ func Expand(profile config.SandboxProfile, in Inputs) ([]string, error) {
 		"workdir":    in.Workdir,
 		"skills_csv": skillsCSV,
 		"inner_cmd":  innerCmd,
+		"tcp_port":   fmt.Sprintf("%d", in.TCPPort),
 	}
 	list := map[string][]string{
 		"inner_args":          innerArgs,
@@ -158,9 +160,27 @@ func OmacEnvName(mount string) string {
 	return b.String()
 }
 
+// OmacSocketEnvName maps a mount like "himalaya-email" to
+// "OMAC_HIMALAYA_EMAIL_SOCKET_BASE" — the env var carrying the
+// http+unix:// URL form. The TCP form lives under OmacEnvName, which
+// is the default (because TCP is the transport that works under
+// nono proxy mode on macOS).
+func OmacSocketEnvName(mount string) string {
+	// Strip the trailing "_BASE" we'd get from OmacEnvName and append
+	// "_SOCKET_BASE" instead, so the two forms have parallel suffixes.
+	return strings.TrimSuffix(OmacEnvName(mount), "_BASE") + "_SOCKET_BASE"
+}
+
 // OmacEnvValue returns the http+unix URL for the given mount.
 func OmacEnvValue(mount, socket string) string {
 	return "http+unix://" + url.PathEscape(socket) + "/" + mount + "/"
+}
+
+// OmacTCPEnvValue returns the http://127.0.0.1:<port>/<mount>/ URL.
+// This is the form sandboxed clients should use when nono proxy mode
+// is active (or any other environment that blocks AF_UNIX connect).
+func OmacTCPEnvValue(mount string, port int) string {
+	return fmt.Sprintf("http://127.0.0.1:%d/%s/", port, mount)
 }
 
 // Exec runs the argv as a child process and waits for it, forwarding stdio

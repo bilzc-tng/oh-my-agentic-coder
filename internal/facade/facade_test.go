@@ -68,7 +68,7 @@ func TestFacadePlainHTTPAndSSE(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	// Unix socket paths have a length limit (~104 on darwin); keep it short.
 	socket := filepath.Join(dir, "b.sock")
-	f := New(socket,
+	f := New(socket, "",
 		[]Route{{Mount: "demo", UpstreamPort: port}},
 		1024*1024,
 		30*time.Second,
@@ -208,7 +208,7 @@ func TestFacadeEchoLikeRest(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	socket := filepath.Join(dir, "b.sock")
 
-	f := New(socket,
+	f := New(socket, "",
 		[]Route{{Mount: "echo", UpstreamPort: port, Skill: "echo-rest"}},
 		1<<20, 30*time.Second, "", "test")
 	if err := f.Start(context.Background()); err != nil {

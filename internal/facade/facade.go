@@ -39,25 +39,46 @@ type Route struct {
 	Skill        string        // registry name
 }
 
-// Facade is a Unix-socket HTTP server that reverse-proxies to registered upstreams.
+// Facade is an HTTP reverse proxy that simultaneously serves on a Unix
+// domain socket AND a 127.0.0.1 TCP port. Both listeners share the same
+// handler, so clients can pick whichever transport their environment
+// permits.
+//
+// Why both:
+//
+//   - Unix socket: lower overhead, file-permission-gated; works in
+//     unsandboxed runs and in nono on Linux (where AF_UNIX is purely
+//     filesystem-governed).
+//   - TCP loopback: required on macOS when nono runs in proxy mode
+//     (auto-activated by `custom_credentials`, `--network-profile`,
+//     etc.). Proxy mode installs `(deny network*)` in Seatbelt, which
+//     classifies AF_UNIX `connect(2)` as `network-outbound` and blocks
+//     it. There is no documented way to override that for a single
+//     Unix-socket path. `--open-port` whitelists a TCP port instead.
 type Facade struct {
-	SocketPath    string
+	SocketPath    string // Unix socket path; "" disables Unix listener.
+	TCPAddr       string // bind addr for TCP listener (e.g. "127.0.0.1:0"); "" disables TCP.
 	Routes        []Route
 	MaxBodyBytes  int64
 	IdleTimeout   time.Duration
 	AccessLogPath string
 	Version       string
 
-	mu      sync.RWMutex
-	routes  map[string]*Route
-	server  *http.Server
-	listen  net.Listener
-	accLog  *log.Logger
-	accFile *os.File
+	mu          sync.RWMutex
+	routes      map[string]*Route
+	server      *http.Server
+	unixLn      net.Listener
+	tcpLn       net.Listener
+	boundTCPort int // resolved port if TCPAddr ends in :0
+	accLog      *log.Logger
+	accFile     *os.File
 }
 
-// New constructs a Facade from a slice of Routes.
-func New(socketPath string, routes []Route, maxBody int64, idle time.Duration, accessLog, version string) *Facade {
+// New constructs a Facade. socketPath may be empty to disable the Unix
+// listener; tcpAddr may be empty to disable the TCP listener. Passing
+// "127.0.0.1:0" asks the OS for an ephemeral port (read it back via
+// TCPPort() after Start).
+func New(socketPath, tcpAddr string, routes []Route, maxBody int64, idle time.Duration, accessLog, version string) *Facade {
 	m := make(map[string]*Route, len(routes))
 	for i := range routes {
 		r := routes[i]
@@ -65,6 +86,7 @@ func New(socketPath string, routes []Route, maxBody int64, idle time.Duration, a
 	}
 	return &Facade{
 		SocketPath:    socketPath,
+		TCPAddr:       tcpAddr,
 		Routes:        routes,
 		MaxBodyBytes:  maxBody,
 		IdleTimeout:   idle,
@@ -74,31 +96,13 @@ func New(socketPath string, routes []Route, maxBody int64, idle time.Duration, a
 	}
 }
 
-// Start opens the socket and begins serving. Returns once the listener is bound.
-// Call Close to stop.
+// TCPPort returns the bound TCP port (after Start). Zero means TCP is
+// disabled or not yet bound.
+func (f *Facade) TCPPort() int { return f.boundTCPort }
+
+// Start opens the listeners and begins serving. Returns once both are
+// bound. Call Close to stop.
 func (f *Facade) Start(ctx context.Context) error {
-	_ = os.Remove(f.SocketPath) // clean stale
-	if err := os.MkdirAll(dirOf(f.SocketPath), 0o700); err != nil {
-		return fmt.Errorf("facade: mkdir socket dir: %w", err)
-	}
-	ln, err := net.Listen("unix", f.SocketPath)
-	if err != nil {
-		return fmt.Errorf("facade: listen unix %s: %w", f.SocketPath, err)
-	}
-	if err := os.Chmod(f.SocketPath, 0o600); err != nil {
-		ln.Close()
-		return fmt.Errorf("facade: chmod socket: %w", err)
-	}
-	if f.AccessLogPath != "" {
-		af, err := os.OpenFile(f.AccessLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-		if err != nil {
-			ln.Close()
-			return fmt.Errorf("facade: open access log: %w", err)
-		}
-		f.accFile = af
-		f.accLog = log.New(af, "", 0)
-	}
-	f.listen = ln
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", f.handle)
 	f.server = &http.Server{
@@ -106,12 +110,81 @@ func (f *Facade) Start(ctx context.Context) error {
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       f.IdleTimeout,
 	}
-	go func() {
-		if err := f.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			_, _ = fmt.Fprintln(os.Stderr, "facade: serve:", err)
+
+	if f.AccessLogPath != "" {
+		af, err := os.OpenFile(f.AccessLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("facade: open access log: %w", err)
 		}
-	}()
+		f.accFile = af
+		f.accLog = log.New(af, "", 0)
+	}
+
+	if f.SocketPath != "" {
+		_ = os.Remove(f.SocketPath) // clean stale
+		if err := os.MkdirAll(dirOf(f.SocketPath), 0o700); err != nil {
+			f.cleanupListeners()
+			return fmt.Errorf("facade: mkdir socket dir: %w", err)
+		}
+		ln, err := net.Listen("unix", f.SocketPath)
+		if err != nil {
+			f.cleanupListeners()
+			return fmt.Errorf("facade: listen unix %s: %w", f.SocketPath, err)
+		}
+		if err := os.Chmod(f.SocketPath, 0o600); err != nil {
+			ln.Close()
+			f.cleanupListeners()
+			return fmt.Errorf("facade: chmod socket: %w", err)
+		}
+		f.unixLn = ln
+		go func() {
+			if err := f.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				_, _ = fmt.Fprintln(os.Stderr, "facade: serve unix:", err)
+			}
+		}()
+	}
+
+	if f.TCPAddr != "" {
+		ln, err := net.Listen("tcp", f.TCPAddr)
+		if err != nil {
+			f.cleanupListeners()
+			return fmt.Errorf("facade: listen tcp %s: %w", f.TCPAddr, err)
+		}
+		if ta, ok := ln.Addr().(*net.TCPAddr); ok {
+			f.boundTCPort = ta.Port
+		}
+		f.tcpLn = ln
+		go func() {
+			if err := f.server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				_, _ = fmt.Fprintln(os.Stderr, "facade: serve tcp:", err)
+			}
+		}()
+	}
+
+	if f.unixLn == nil && f.tcpLn == nil {
+		return fmt.Errorf("facade: no listener configured (set SocketPath and/or TCPAddr)")
+	}
 	return nil
+}
+
+// cleanupListeners closes whatever has been opened so far. Safe to call
+// from any partial state during Start.
+func (f *Facade) cleanupListeners() {
+	if f.unixLn != nil {
+		_ = f.unixLn.Close()
+		f.unixLn = nil
+	}
+	if f.tcpLn != nil {
+		_ = f.tcpLn.Close()
+		f.tcpLn = nil
+	}
+	if f.SocketPath != "" {
+		_ = os.Remove(f.SocketPath)
+	}
+	if f.accFile != nil {
+		_ = f.accFile.Close()
+		f.accFile = nil
+	}
 }
 
 // Close tears down the server and removes the socket.
@@ -124,8 +197,11 @@ func (f *Facade) Close() error {
 			firstErr = err
 		}
 	}
-	if f.listen != nil {
-		_ = f.listen.Close()
+	if f.unixLn != nil {
+		_ = f.unixLn.Close()
+	}
+	if f.tcpLn != nil {
+		_ = f.tcpLn.Close()
 	}
 	if f.accFile != nil {
 		_ = f.accFile.Close()

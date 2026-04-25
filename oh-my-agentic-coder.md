@@ -377,33 +377,66 @@ All files in this directory are created with `0600` / `0700` masks. On clean shu
 
 ## 9. Environment contract (inside sandbox)
 
-The facade + launcher inject exactly these variables into the sandbox:
+The facade binds two transports — Unix domain socket and 127.0.0.1
+TCP — and surfaces both to the sandbox. The launcher injects these
+variables:
 
 | Variable | Value | Purpose |
 | --- | --- | --- |
-| `OMAC_SOCKET` | Absolute path to `bridge.sock`. | Primary pointer for any client. |
-| `OMAC_SKILLS` | Comma-separated list of active skill mounts. | Allows introspection. |
-| `OMAC_<SKILL>_BASE` | `http+unix://<percent-encoded-socket>/<mount>/` | Convenience base URL per skill. |
-| `OMAC_VERSION` | `omac` binary version. | For skill compatibility checks. |
+| `OMAC_BASE` | `http://127.0.0.1:<port>/` | Top-level TCP base URL. |
+| `OMAC_HOST` | `127.0.0.1` | Components of OMAC_BASE for clients that build URLs. |
+| `OMAC_PORT` | `<port>` | Same. |
+| `OMAC_SOCKET` | Absolute path to `bridge.sock`. | Unix transport (fallback). |
+| `OMAC_SKILLS` | Comma-separated list of active skill mounts. | Introspection. |
+| `OMAC_<SKILL>_BASE` | `http://127.0.0.1:<port>/<mount>/` | **Preferred** per-skill URL (TCP). |
+| `OMAC_<SKILL>_SOCKET_BASE` | `http+unix://<pct-encoded-socket>/<mount>/` | Per-skill Unix URL (fallback). |
+| `OMAC_VERSION` | `omac` binary version. | Skill compatibility checks. |
 
-Skill name → env suffix mapping: uppercase, `-` → `_`, non-alphanumerics stripped. `himalaya-email` → `OMAC_HIMALAYA_EMAIL_BASE`.
+Skill name → env suffix mapping: uppercase, `-` → `_`, non-alphanumerics stripped. `himalaya-email` → `OMAC_HIMALAYA_EMAIL_BASE` and `OMAC_HIMALAYA_EMAIL_SOCKET_BASE`.
 
-Client examples:
+**Why two transports.** On macOS, when nono runs in proxy mode (auto-
+activated by any nono profile defining `custom_credentials`, by
+`--network-profile`, `--allow-domain`, `--credential`, or
+`--upstream-proxy`), Seatbelt installs `(deny network*)`. Unix-socket
+`connect(2)` is classified as `network-outbound`, so the AF_UNIX form
+becomes unreachable. The launcher passes `--open-port <tcp-port>` to
+nono, which emits a more-specific allow rule that takes precedence
+over the blanket deny. The Unix path remains valid in unsandboxed
+runs and on Linux. Clients should prefer the TCP form.
+
+### Client examples
 
 ```bash
-# curl (7.40+):
-curl --unix-socket "$OMAC_SOCKET" http://x/slack/api/chat.postMessage …
+# Preferred: TCP form, works under nono proxy mode on macOS.
+curl -sS "${OMAC_SLACK_BASE}api/chat.postMessage" -d '...'
+```
+
+```bash
+# Fallback: Unix-socket form (works on Linux + on macOS without proxy mode).
+curl -sS --unix-socket "$OMAC_SOCKET" http://x/slack/api/chat.postMessage
 ```
 
 ```python
-# Python:
+# Python (TCP):
+import os, requests
+r = requests.get(f"{os.environ['OMAC_SLACK_BASE']}status")
+```
+
+```python
+# Python (Unix):
 import requests_unixsocket, os
 s = requests_unixsocket.Session()
 r = s.get(f"http+unix://{os.environ['OMAC_SOCKET'].replace('/', '%2F')}/slack/status")
 ```
 
 ```javascript
-// Node (undici):
+// Node (undici, TCP):
+import { request } from "undici";
+await request(`${process.env.OMAC_SLACK_BASE}status`);
+```
+
+```javascript
+// Node (undici, Unix):
 import { request } from "undici";
 await request("http://x/slack/status", { socketPath: process.env.OMAC_SOCKET });
 ```
@@ -701,21 +734,20 @@ Tokens that resolve to arrays are splatted in place (tokens surrounded by other 
 
 The existing `tng-sandbox.json` Nono profile remains the trust policy for filesystem/network. The `omac` Nono profile additionally:
 
-- Adds `--allow-file {{socket}}` so the sandbox can `open(2)` the bridge socket inode.
+- Adds `--allow-file {{socket}}` so the sandbox can `open(2)` the bridge socket inode (covers the Unix transport on Linux and on macOS without proxy mode).
 - Adds `--read {{socket_dir}}` so component-wise path resolution during `connect(2)` succeeds without depending on Nono's `system_read_macos` group covering `$TMPDIR/omac-*`.
+- Adds `--open-port {{tcp_port}}` to whitelist the facade's loopback TCP port. Per nono's [Networking](https://nono.sh/docs/cli/features/networking#localhost-ipc) docs, `--open-port` allows bidirectional `127.0.0.1:<port>` and works alongside proxy mode. **This is the transport that works under proxy mode on macOS.**
 - Sets `OMAC_*` variables in its own process environment before `exec`ing nono. Nono propagates the parent environment to the inner process by default. (Nono no longer accepts literal `--env KEY=VAL` flags; the only `--env-*` flag is `--env-credential`, which is keystore-only.)
 
-No change to the existing `tng-sandbox.json` content is required; `omac` only wraps Nono. **However, if you author a custom nono profile with `environment.allow_vars` set, you must include `OMAC_*` (or the explicit names `OMAC_SOCKET`, `OMAC_SKILLS`, `OMAC_VERSION`, and one `OMAC_<SKILL>_BASE` per registered skill) in the allow-list, or the sandbox will not see them.**
+No change to the existing `tng-sandbox.json` content is required; `omac` only wraps Nono. **However, if you author a custom nono profile with `environment.allow_vars` set, you must include `OMAC_*` (or the explicit names `OMAC_SOCKET`, `OMAC_HOST`, `OMAC_PORT`, `OMAC_BASE`, `OMAC_SKILLS`, `OMAC_VERSION`, and `OMAC_<SKILL>_BASE` / `OMAC_<SKILL>_SOCKET_BASE` per registered skill) in the allow-list, or the sandbox will not see them.**
 
-**Unix-socket semantics under Nono.** Per [Nono's Seatbelt documentation](https://nono.sh/docs/cli/internals/seatbelt), macOS classifies `connect(2)` on a Unix socket as `network-outbound`, not as a file operation. On Linux, AF_UNIX is governed by Landlock's file-path ACLs and is not part of its TCP port filter.
+**Two transports, by design.** Per [Nono's Seatbelt documentation](https://nono.sh/docs/cli/internals/seatbelt), macOS classifies `connect(2)` on a Unix socket as `network-outbound`, not as a file operation. On Linux, AF_UNIX is governed by Landlock's file-path ACLs and is not part of its TCP port filter. Three platform-specific consequences:
 
-Three platform-specific consequences:
+1. **Linux**: `--allow-file <socket>` is sufficient for the Unix transport. AF_UNIX is purely filesystem-governed. `--open-port` is also installed; agents may use either.
+2. **macOS without proxy mode**: `--allow-file` is sufficient and the default network policy is allow. Both transports work.
+3. **macOS with proxy mode** (the common case — proxy mode is automatically activated whenever the active nono profile defines `custom_credentials`, sets `network_profile`, or whenever the user passes `--allow-domain`/`--credential`/`--upstream-proxy`/`--network-profile`): proxy mode installs `(deny network*)` plus an allow rule for the proxy port. The blanket deny applies to Unix-socket `connect(2)` too — `--allow-file` only grants `open(2)`, not the network-classified connect, so the Unix transport is **not reachable** in this mode. The TCP transport works because `--open-port` emits a more-specific allow rule that takes precedence.
 
-1. **Linux**: `--allow-file <socket>` is sufficient. AF_UNIX is purely filesystem-governed.
-2. **macOS without proxy mode**: `--allow-file` is sufficient *and* the default network policy is allow.
-3. **macOS with proxy mode** (the common case — proxy mode is automatically activated whenever the active nono profile defines `custom_credentials`, sets `network_profile`, or whenever the user passes `--allow-domain`/`--credential`/`--upstream-proxy`/`--network-profile`): `--allow-file` alone is *not* sufficient. Proxy mode installs `(deny network*)` plus a single `(allow network-outbound (remote tcp "localhost:PORT"))`. The blanket deny applies to Unix-socket `connect(2)` too. The fix is `--override-deny <socket>`, which lifts the deny for that exact path while keeping the matching `--allow-file` grant. Both omac-shipped profiles include this flag unconditionally; it is harmless when proxy mode is not active.
-
-`--block-net` remains incompatible with this design on macOS for the same reason — it also emits `(deny network*)`. There is no documented `--override-deny` analogue for `--block-net`'s rules. Use `--network-profile minimal` instead if you need outbound TCP filtering.
+`--block-net` is more restrictive: it installs `(deny network*)` with no `--open-port`-style escape on macOS in the current nono release. The TCP transport may or may not survive depending on rule ordering; treat as untested until verified.
 
 The launcher config shipped with `omac` (see `internal/config/launcher.go`) provides two ready-made profiles — `nono` and `nono-netprofile` — that encode these choices. See the repository README for the full flag-to-behavior matrix.
 
@@ -1038,45 +1070,57 @@ sidecar:
 
 ## Appendix C — Reference Nono invocation produced by the launcher
 
-With two skills (`slack`, `himalaya-email`) registered and profile `nono`:
+With two skills (`slack`, `himalaya-email`) registered and profile
+`nono` (the facade allocates an ephemeral TCP port, e.g. `41017`, and
+binds both transports):
 
 ```
 # omac sets these in its own process env before exec'ing nono;
 # nono propagates the parent env to the inner process.
+OMAC_BASE=http://127.0.0.1:41017/
+OMAC_HOST=127.0.0.1
+OMAC_PORT=41017
 OMAC_SOCKET=/tmp/omac-9f4b3a8c2e10/bridge.sock
 OMAC_SKILLS=slack,himalaya-email
-OMAC_SLACK_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/slack/
-OMAC_HIMALAYA_EMAIL_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/himalaya/
+OMAC_SLACK_BASE=http://127.0.0.1:41017/slack/
+OMAC_SLACK_SOCKET_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/slack/
+OMAC_HIMALAYA_EMAIL_BASE=http://127.0.0.1:41017/himalaya-email/
+OMAC_HIMALAYA_EMAIL_SOCKET_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/himalaya-email/
 OMAC_VERSION=0.1.0
 
 nono run \
   --allow-cwd \
   --profile tng-sandbox \
-  --allow-file    /tmp/omac-9f4b3a8c2e10/bridge.sock \
-  --override-deny /tmp/omac-9f4b3a8c2e10/bridge.sock \
-  --read          /tmp/omac-9f4b3a8c2e10 \
+  --allow-file /tmp/omac-9f4b3a8c2e10/bridge.sock \
+  --read       /tmp/omac-9f4b3a8c2e10 \
+  --open-port  41017 \
   -- \
   opencode
 ```
 
-Two non-obvious things in that argv:
+Three non-obvious things in that argv:
 
-1. **`--override-deny`** is paired with `--allow-file` on the socket path.
-   It lifts macOS Seatbelt's `(deny network*)` rule (installed by Nono
-   whenever proxy mode is active — and proxy mode is auto-activated by
-   the `custom_credentials.tng_skills` block in `tng-sandbox.json`) so
-   the sandbox can `connect(2)` to the AF_UNIX socket. Without this
-   flag, `--allow-file` alone grants `open(2)` but not the
-   network-classified connect, and the agent gets `EPERM` on connect.
+1. **`--open-port <tcp-port>`** is the documented way to allow
+   bidirectional `127.0.0.1:<port>` from inside a nono sandbox (see
+   the [Localhost IPC](https://nono.sh/docs/cli/features/networking#localhost-ipc)
+   section of nono's networking docs). It works alongside proxy mode
+   (auto-activated by `tng-sandbox.json`'s `custom_credentials.tng_skills`
+   block) — without this flag, Seatbelt's `(deny network*)` would
+   block the agent from reaching either transport.
 
-2. **Env-var injection is via process env, not flags.** Nono no longer
-   accepts a literal `--env KEY=VAL` flag (the only `--env-*` flag is
-   `--env-credential`, which is keystore-only). `omac` sets `OMAC_*` in
-   nono's process environment before exec; nono propagates the parent
-   env to the inner process by default. Profiles with
-   `environment.allow_vars` set must include `OMAC_*` in the list.
-   The shipped `tng-sandbox.json` leaves that section unset, so the
-   default-allow behaviour delivers them automatically.
+2. **`--allow-file` + `--read` cover the Unix transport** for
+   non-proxy-mode setups (Linux Landlock + macOS without proxy mode).
+   They are harmless under proxy mode (where the AF_UNIX `connect(2)`
+   is blocked anyway).
+
+3. **Env-var injection is via process env, not flags.** Nono no
+   longer accepts a literal `--env KEY=VAL` flag (the only `--env-*`
+   flag is `--env-credential`, which is keystore-only). `omac` sets
+   `OMAC_*` in nono's process environment before exec; nono
+   propagates the parent env to the inner process by default.
+   Profiles with `environment.allow_vars` set must include `OMAC_*`
+   in the list. The shipped `tng-sandbox.json` leaves that section
+   unset, so the default-allow behaviour delivers them automatically.
 
 ## Appendix D — End-to-end walkthrough
 

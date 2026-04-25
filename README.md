@@ -215,109 +215,121 @@ stream into a single response write.
 
 ## Running under nono
 
-[nono](https://nono.sh) is the sandbox runtime that the default omac launcher
-profile targets. This section explains exactly what needs to be configured
-for the omac Unix-socket facade to be reachable from inside a nono sandbox,
-with references to the relevant nono documentation pages.
+[nono](https://nono.sh) is the sandbox runtime the default omac launcher
+profile targets. This section explains exactly what needs to be
+configured so the facade is reachable from inside a nono sandbox, with
+references to the relevant nono documentation pages.
 
-### TL;DR
+### Two transports, by design
 
-The default `nono` profile shipped by omac (`internal/config/launcher.go`) works
-out of the box on macOS and Linux with no extra flags from the user:
+The facade binds **both** a Unix domain socket *and* a 127.0.0.1 TCP
+port on every run. Inside the sandbox the agent gets four env vars per
+skill plus three top-level ones:
+
+| Env var | Value | Notes |
+| --- | --- | --- |
+| `OMAC_BASE` | `http://127.0.0.1:<port>/` | TCP transport (preferred). |
+| `OMAC_HOST` / `OMAC_PORT` | `127.0.0.1` / `<port>` | Components of `OMAC_BASE`. |
+| `OMAC_SOCKET` | `/tmp/omac-<hash>/bridge.sock` | Unix transport (fallback). |
+| `OMAC_<SKILL>_BASE` | `http://127.0.0.1:<port>/<skill>/` | Per-skill TCP URL. |
+| `OMAC_<SKILL>_SOCKET_BASE` | `http+unix://%2F.../<skill>/` | Per-skill Unix URL. |
+| `OMAC_SKILLS` | comma-separated mounts | Introspection. |
+
+Why both:
+
+- **TCP loopback** is the form that works on macOS under nono's *proxy
+  mode* (auto-activated whenever the active nono profile defines
+  `custom_credentials` — including the shipped `tng-sandbox.json`'s
+  `tng_skills` block — or you pass `--network-profile`,
+  `--allow-domain`, `--credential`, or `--upstream-proxy`). Proxy
+  mode installs `(deny network*)` in Seatbelt, and Seatbelt classifies
+  AF_UNIX `connect(2)` as `network-outbound` — so the Unix socket
+  becomes unreachable. The launcher profile uses `--open-port <tcp-port>`
+  to whitelist the facade's loopback port; per nono's
+  [Networking](https://nono.sh/docs/cli/features/networking#localhost-ipc)
+  docs that emits a Seatbelt allow rule that takes precedence over the
+  blanket deny.
+
+- **Unix socket** is the lower-overhead form and works everywhere
+  *except* macOS-under-proxy-mode: on Linux it's purely
+  filesystem-governed (Landlock has no AF_UNIX filter), and on macOS
+  *without* proxy mode the default network policy is `allow`. We
+  expose it so any agent that prefers it can still use it.
+
+Inside the sandbox a client should prefer `OMAC_<SKILL>_BASE` (TCP)
+and treat `OMAC_<SKILL>_SOCKET_BASE` as an opportunistic fallback.
+
+### TL;DR — what omac actually runs
 
 ```
 nono run \
   --allow-cwd \
   --profile tng-sandbox \
-  --allow-file  <socket-path>  \
-  --read        <socket-dir>   \
-  --env OMAC_SOCKET=<socket-path> \
-  --env OMAC_SKILLS=<csv> \
-  --env OMAC_<SKILL>_BASE=http+unix://... \
-  ...
+  --allow-file <socket-path>  \
+  --read       <socket-dir>   \
+  --open-port  <tcp-port>     \
   -- opencode
 ```
 
-No `--open-port`, no `--allow-domain`, no network-profile changes are
-required because nono allows network by default and Seatbelt/Landlock
-treat Unix-socket connect paths as filesystem access in the policy you
-already grant with `--allow-file`.
-
-### Why it works
-
-1. **Unix sockets on macOS (Seatbelt).** Per nono's
-   [macOS Seatbelt internals](https://nono.sh/docs/cli/internals/seatbelt),
-   `connect(2)` on a Unix socket is classified as `network-outbound`, not a
-   file operation. Since the default nono network policy is *allow*
-   (see [Networking](https://nono.sh/docs/cli/features/networking#network-control)),
-   the sandboxed process is free to initiate outbound Unix-socket
-   connections — provided it can **open the socket path**, which is a
-   separate filesystem check that we grant with `--allow-file`.
-2. **Unix sockets on Linux (Landlock).** Landlock ABI v4 only filters TCP
-   (by port) and does not restrict AF_UNIX at all. File-path access to the
-   socket is governed by `file-read*` / `file-write*` — exactly what
-   `--allow-file` grants.
-3. **Path resolution.** Both kernels walk the socket's parent directory
-   during `connect(2)` to resolve the inode. omac's default `nono` profile
-   therefore also passes `--read {{socket_dir}}` to cover the `$TMPDIR/omac-<hash>/`
-   directory (which is not part of nono's `system_read_macos` group, see
-   [Profiles & Groups](https://nono.sh/docs/cli/features/profiles-groups#built-in-groups)).
-
-The socket path is `$TMPDIR/omac-<workdir-hash>/bridge.sock` with mode `0600`
-and the directory is `0700` (see the design doc §8.3). On macOS this
-canonicalizes to `/private/var/folders/...`; nono's path resolution handles
-the firmlink transparently.
-
-### Combining with network-restricting flags
-
-| nono flag/config                                           | Effect on the omac Unix socket         | What you need to do                                                         |
-| ---------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------- |
-| *(default: network allowed)*                               | Reachable                              | Nothing extra.                                                              |
-| `--network-profile <name>` (e.g. `opencode`, `claude-code`) | Reachable                              | Nothing extra. Network profiles filter TCP outbound only; Unix sockets are not affected. Use the bundled `nono-netprofile` omac profile. |
-| `--allow-domain …`                                         | Reachable                              | Nothing extra. Same rationale as `--network-profile`.                      |
-| `--block-net`                                              | **Blocked on macOS.**                  | Do not combine `--block-net` with this design on macOS. On Linux the kernel permits AF_UNIX under Landlock, but `--block-net` installs a seccomp filter that may affect syscalls beyond TCP — test before relying on it. If you need no-TCP-out-except-the-facade, prefer `--network-profile minimal` plus domain filtering. |
-| `--credential …` (reverse-proxy mode)                      | Reachable                              | Nothing extra. Credential injection is an HTTP reverse proxy on a loopback TCP port and is orthogonal to the Unix-socket facade. |
-| `--upstream-proxy …` / `--upstream-bypass …`               | Reachable                              | Nothing extra.                                                              |
+`OMAC_*` env vars are set in nono's parent process and propagate to the
+inner child by default. (Nono no longer accepts a literal `--env KEY=VAL`
+flag; the only `--env-*` flag is `--env-credential`, which is keystore-
+only. If you author a custom nono profile with `environment.allow_vars`
+set, add `OMAC_*` to that list or the variables will be filtered.)
 
 ### Built-in omac profiles
 
 `omac start --sandbox <name>` selects from:
 
-| Profile             | nono flags                                                                       | Use when                                                      |
-| ------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `nono` *(default)*  | `--allow-cwd --profile tng-sandbox --allow-file <sock> --read <sockdir>`         | Default; network allowed by host.                             |
-| `nono-netprofile`   | As above plus `--network-profile opencode`                                        | Restrict outbound HTTP to nono's `opencode` profile domains.  |
-| `no-sandbox-debug`  | *(no nono — runs inner command directly)*                                        | Local debugging only. Not a security boundary.                |
+| Profile             | nono flags                                                                                 | Use when                                                      |
+| ------------------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| `nono` *(default)*  | `--allow-cwd --profile tng-sandbox --allow-file <sock> --read <sockdir> --open-port <p>`   | Default. Works under host-default network policy *and* under proxy mode auto-activated by `tng-sandbox.json`'s `custom_credentials`. |
+| `nono-netprofile`   | As above plus `--network-profile opencode`                                                 | Restrict outbound HTTP to nono's `opencode` profile domains.  |
+| `no-sandbox-debug`  | *(no nono — runs inner command directly)*                                                  | Local debugging only. Not a security boundary.                |
 
 You can add your own profiles by creating `.opencode/oh-my-agentic-coder.json`
-in the workdir. See the design doc §14 for the full launcher-config schema.
+in the workdir. See the design doc §14 for the full launcher-config
+schema. Available placeholders: `{{socket}}`, `{{socket_dir}}`,
+`{{tcp_port}}`, `{{workdir}}`, `{{skills_csv}}`, `{{inner_cmd}}`,
+`{{inner_args}}`, `{{per_skill_env_flags}}`.
+
+### Combining with other nono flags
+
+| nono flag/config                                            | Effect on the facade                              | What you need to do                                                                       |
+| ----------------------------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| *(no extra flags; default-allow network)*                   | Both transports reachable.                        | Nothing extra. Use profile `nono`.                                                        |
+| `--network-profile <name>` (e.g. `opencode`, `claude-code`) | TCP reachable via `--open-port`.                  | Nothing extra. Use profile `nono-netprofile` (or add `--open-port` to your own profile).  |
+| `--allow-domain …`                                          | Same as above (also activates proxy mode).        | Nothing extra.                                                                            |
+| `--credential …`                                            | Same as above.                                    | Nothing extra.                                                                            |
+| `--upstream-proxy …` / `--upstream-bypass …`                | Same as above.                                    | Nothing extra.                                                                            |
+| `--block-net`                                               | **Both transports blocked on macOS.**             | `--open-port` *should* still allow the loopback TCP port even under `--block-net` (see nono's "Localhost IPC" docs). Untested; report any failures. The Unix socket remains blocked because of `(deny network*)`. On Linux the picture is different (Landlock filters TCP only). |
 
 ### Setting it up from scratch
 
 1. Install nono per the
    [nono installation guide](https://nono.sh/docs/cli/getting_started/installation).
 2. Copy the repository's `tng-sandbox.json` nono profile into
-   `~/.config/nono/profiles/` (see `install.sh` in the workspace root or
-   [Profile Authoring](https://nono.sh/docs/cli/features/profile-authoring)).
+   `~/.config/nono/profiles/` (see `install.sh` in the workspace root
+   or [Profile Authoring](https://nono.sh/docs/cli/features/profile-authoring)).
    This profile grants cwd + the paths OpenCode itself needs.
-3. Install omac (`go build -o omac ./cmd/omac` in this directory, then move
-   to `$PATH`).
-4. `omac register <skill>` once per skill (prompts for secrets → keychain;
-   see the main workflow above).
+3. Install omac (`go build -o omac ./cmd/omac` in this directory, then
+   move to `$PATH`).
+4. `omac register <skill>` once per skill.
 5. `omac start` launches the stack: sidecars → facade → `nono run ... -- opencode`.
-6. From inside the sandbox, the agent reads `$OMAC_SOCKET` (and
-   per-skill `$OMAC_<SKILL>_BASE`) and issues HTTP requests:
+6. From inside the sandbox the agent uses `$OMAC_<SKILL>_BASE`:
 
     ```bash
-    curl --unix-socket "$OMAC_SOCKET" http://x/<skill>/status
+    curl -sS "${OMAC_ECHO_BASE}whoami"          # TCP, works under proxy mode
+    curl -sS --unix-socket "$OMAC_SOCKET" \     # Unix fallback
+         http://x/echo/whoami
     ```
 
 ### Debugging inside the sandbox
 
-Use nono's built-in introspection:
-
 ```bash
-# From inside the sandbox, verify the socket is reachable:
+# Verify the loopback port is open:
+nono why --self --host 127.0.0.1 --port "$OMAC_PORT" --json
+# Verify the Unix socket is reachable (filesystem layer):
 nono why --self --path "$OMAC_SOCKET" --op read --json
 ```
 

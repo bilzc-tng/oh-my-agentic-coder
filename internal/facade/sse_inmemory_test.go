@@ -31,7 +31,7 @@ func TestFacadeSSE_InMemory(t *testing.T) {
 	t.Cleanup(upstream.stop)
 
 	// 2. Facade pointed at the upstream.
-	f := New("", // socket path unused; we don't Start() the facade
+	f := New("", "", // listeners unused; we don't Start() the facade
 		[]Route{{Mount: "echo", UpstreamPort: upstreamPort, Skill: "echo-rest"}},
 		1<<20, 30*time.Second, "", "test")
 	// Build the handler manually (same wiring as Facade.Start, minus the listener).

@@ -13,6 +13,7 @@ func TestExpand_Nono(t *testing.T) {
 	got, err := Expand(prof, Inputs{
 		Workdir:  "/work",
 		Socket:   "/tmp/omac-abc/bridge.sock",
+		TCPPort:  41017,
 		Mounts:   []string{"slack", "himalaya-email"},
 		InnerCmd: []string{"opencode", "--model", "opus"},
 	})
@@ -24,8 +25,8 @@ func TestExpand_Nono(t *testing.T) {
 		"--allow-cwd",
 		"--profile", "tng-sandbox",
 		"--allow-file", "/tmp/omac-abc/bridge.sock",
-		"--override-deny", "/tmp/omac-abc/bridge.sock",
 		"--read", "/tmp/omac-abc",
+		"--open-port", "41017",
 		"--",
 		"opencode", "--model", "opus",
 	}
@@ -35,16 +36,18 @@ func TestExpand_Nono(t *testing.T) {
 }
 
 // TestExpand_NonoNetprofile asserts the --network-profile variant.
-// Both profiles include --override-deny on the socket, because both
-// `custom_credentials` (in tng-sandbox.json) and `--network-profile`
-// activate Nono's proxy mode, which installs `(deny network*)` on
-// macOS — including Unix-socket connects. --override-deny lifts that.
+// Both profiles use --open-port on the facade's TCP port, because both
+// custom_credentials (in tng-sandbox.json) and --network-profile
+// activate nono's proxy mode, which installs `(deny network*)` on
+// macOS — including Unix-socket connects. --open-port emits a more-
+// specific allow rule for that loopback port that takes precedence.
 func TestExpand_NonoNetprofile(t *testing.T) {
 	lc := config.DefaultLauncherConfig()
 	prof := lc.Sandbox.Profiles["nono-netprofile"]
 	got, err := Expand(prof, Inputs{
 		Workdir:  "/work",
 		Socket:   "/tmp/omac-abc/bridge.sock",
+		TCPPort:  41017,
 		Mounts:   []string{"slack"},
 		InnerCmd: []string{"opencode"},
 	})
@@ -57,8 +60,8 @@ func TestExpand_NonoNetprofile(t *testing.T) {
 		"--profile", "tng-sandbox",
 		"--network-profile", "opencode",
 		"--allow-file", "/tmp/omac-abc/bridge.sock",
-		"--override-deny", "/tmp/omac-abc/bridge.sock",
 		"--read", "/tmp/omac-abc",
+		"--open-port", "41017",
 		"--",
 		"opencode",
 	}

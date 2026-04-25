@@ -218,9 +218,14 @@ func runStart(args []string, env *Env) int {
 		mounts = append(mounts, mount)
 	}
 
-	// 7. Open Unix socket + mount routes.
+	// 7. Open both listeners (Unix socket + ephemeral 127.0.0.1 TCP) and
+	//    mount routes. We always bind both so clients can pick whichever
+	//    transport their environment permits — see internal/facade for
+	//    the rationale (proxy-mode Seatbelt blocks AF_UNIX connect on
+	//    macOS, and `--open-port` is the documented escape hatch).
 	f := facade.New(
 		socketPath,
+		"127.0.0.1:0",
 		routes,
 		lc.Facade.MaxBodyBytes,
 		time.Duration(lc.Facade.IdleTimeoutSecs)*time.Second,
@@ -232,8 +237,10 @@ func runStart(args []string, env *Env) int {
 		return ExitIOError
 	}
 	defer f.Close()
+	tcpPort := f.TCPPort()
 	if *verbose {
-		fmt.Fprintf(env.Stderr, "[verbose] facade listening on %s (%d route(s))\n", socketPath, len(routes))
+		fmt.Fprintf(env.Stderr, "[verbose] facade listening on %s and 127.0.0.1:%d (%d route(s))\n",
+			socketPath, tcpPort, len(routes))
 	}
 
 	// 8. Build sandbox argv and exec.
@@ -256,6 +263,7 @@ func runStart(args []string, env *Env) int {
 		argv, err = sandbox.Expand(prof, sandbox.Inputs{
 			Workdir:  env.Workdir,
 			Socket:   socketPath,
+			TCPPort:  tcpPort,
 			Mounts:   mounts,
 			InnerCmd: inner,
 		})
@@ -279,13 +287,22 @@ func runStart(args []string, env *Env) int {
 	// The runtime is expected to propagate parent env to the inner process
 	// (nono's default behavior; controllable via the profile's
 	// `environment.allow_vars` field — if set, OMAC_* must be in it).
+	//
+	// Both transports are advertised to the sandbox. Clients should
+	// prefer OMAC_<SKILL>_BASE (TCP-based by default; that is what works
+	// under nono proxy mode), and fall back to OMAC_<SKILL>_SOCKET_BASE
+	// for environments that prefer Unix sockets.
 	extra := map[string]string{
-		"OMAC_SOCKET":  socketPath,
-		"OMAC_SKILLS":  strings.Join(mounts, ","),
-		"OMAC_VERSION": env.Version,
+		"OMAC_SOCKET":   socketPath,
+		"OMAC_HOST":     "127.0.0.1",
+		"OMAC_PORT":     fmt.Sprintf("%d", tcpPort),
+		"OMAC_BASE":     fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
+		"OMAC_SKILLS":   strings.Join(mounts, ","),
+		"OMAC_VERSION":  env.Version,
 	}
 	for _, m := range mounts {
-		extra[sandbox.OmacEnvName(m)] = sandbox.OmacEnvValue(m, socketPath)
+		extra[sandbox.OmacEnvName(m)] = sandbox.OmacTCPEnvValue(m, tcpPort)
+		extra[sandbox.OmacSocketEnvName(m)] = sandbox.OmacEnvValue(m, socketPath)
 	}
 
 	code, err := sandbox.Exec(argv, extra)

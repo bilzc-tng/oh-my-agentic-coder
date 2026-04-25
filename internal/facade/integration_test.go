@@ -168,7 +168,7 @@ func TestEchoRestEndToEnd(t *testing.T) {
 ready:
 	// Start the facade on a Unix socket routing /echo/* → sidecarPort.
 	socket := filepath.Join(workDir, "b.sock")
-	f := facade.New(socket,
+	f := facade.New(socket, "",
 		[]facade.Route{{Mount: "echo", UpstreamPort: sidecarPort, Skill: "echo-rest"}},
 		1<<20,
 		30*time.Second,
