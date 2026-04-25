@@ -293,12 +293,12 @@ func runStart(args []string, env *Env) int {
 	// under nono proxy mode), and fall back to OMAC_<SKILL>_SOCKET_BASE
 	// for environments that prefer Unix sockets.
 	extra := map[string]string{
-		"OMAC_SOCKET":   socketPath,
-		"OMAC_HOST":     "127.0.0.1",
-		"OMAC_PORT":     fmt.Sprintf("%d", tcpPort),
-		"OMAC_BASE":     fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
-		"OMAC_SKILLS":   strings.Join(mounts, ","),
-		"OMAC_VERSION":  env.Version,
+		"OMAC_SOCKET":  socketPath,
+		"OMAC_HOST":    "127.0.0.1",
+		"OMAC_PORT":    fmt.Sprintf("%d", tcpPort),
+		"OMAC_BASE":    fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
+		"OMAC_SKILLS":  strings.Join(mounts, ","),
+		"OMAC_VERSION": env.Version,
 	}
 	for _, m := range mounts {
 		extra[sandbox.OmacEnvName(m)] = sandbox.OmacTCPEnvValue(m, tcpPort)
