@@ -23,15 +23,23 @@ tagged version. The release pipeline produces:
 
 ### macOS (Homebrew)
 
-The Homebrew formula is attached to each release as a standalone artifact
-(no tap is published). Install it directly from the release URL:
+Releases are auto-published to the
+[TNG-release/homebrew-tap](https://github.com/TNG-release/homebrew-tap) tap.
 
 ```sh
-brew install --formula \
-  https://github.com/TNG/oh-my-agentic-coder/releases/latest/download/oh-my-agentic-coder.rb
+brew tap TNG-release/tap
+brew install oh-my-agentic-coder
 ```
 
-To pin to a specific version, replace `latest/download` with `download/v<X.Y.Z>`.
+To upgrade later:
+
+```sh
+brew update
+brew upgrade oh-my-agentic-coder
+```
+
+Pre-releases (tags like `v1.2.3-rc1`) are intentionally not pushed to the
+tap; install those from the per-release tarball below.
 
 ### Debian / Ubuntu (apt)
 

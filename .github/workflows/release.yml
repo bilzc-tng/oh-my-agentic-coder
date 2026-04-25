@@ -65,6 +65,12 @@ jobs:
             ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--snapshot --skip=publish' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with Contents: read & write on TNG-release/homebrew-tap.
+          # Required so GoReleaser can push the updated formula to the
+          # tap repo on every non-prerelease tag. The default GITHUB_TOKEN
+          # only has scope on the workflow's own repo, so it cannot be
+          # used here.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
       - name: Upload artifacts (snapshot only)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run

@@ -81,16 +81,31 @@ nfpms:
     archlinux:
       packager: TNG Technology Consulting GmbH <[email protected]>
 
-# Homebrew formula: emitted as a release artifact only (no tap push).
-# Users can install with `brew install <url-to-formula>` or by manually
-# adding the formula to a tap.
+# Homebrew formula: pushed to the TNG-release/homebrew-tap repository on
+# every non-prerelease tag. Users install with:
+#   brew tap TNG-release/tap
+#   brew install oh-my-agentic-coder
+#
+# Authentication: GoReleaser uses the HOMEBREW_TAP_TOKEN env var (a fine-
+# grained PAT scoped to the tap repo with `Contents: read & write`).
+# `skip_upload: auto` keeps prereleases (e.g. v1.2.3-rc1) out of the tap.
 brews:
   - name: oh-my-agentic-coder
     ids: [default]
     homepage: https://github.com/TNG/oh-my-agentic-coder
     description: Sandboxed agent-coding facade with keychain-backed secrets.
     license: Apache-2.0
-    skip_upload: "true"
+    directory: Formula
+    skip_upload: auto
+    repository:
+      owner: TNG-release
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: tng-release-bot
+      email: [email protected]
+    commit_msg_template: "chore(formula): bump oh-my-agentic-coder to {{ .Tag }}"
     install: |
       bin.install "omac"
     test: |
