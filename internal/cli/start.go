@@ -8,10 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/tngtech/oh-my-agentic-coder/internal/config"
@@ -270,14 +268,12 @@ func runStart(args []string, env *Env) int {
 		fmt.Fprintf(env.Stderr, "[verbose] sandbox argv: %v\n", argv)
 	}
 
-	// Register signal forwarding: Ctrl-C in the user's terminal aborts this process,
-	// which cancels the context and triggers deferred cleanups.
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		cancel()
-	}()
+	// Signal handling is owned by sandbox.Exec: it places the inner
+	// command in its own process group, hands the terminal foreground to
+	// it (so Ctrl-C goes there directly), and forwards SIGINT/SIGTERM/
+	// SIGHUP/SIGQUIT delivered to omac itself onto the child's pgid.
+	// When the child exits the deferred cleanups below tear down the
+	// facade and the supervised sidecars in order.
 
 	// Extra env for the sandbox child. The sandbox profile is responsible for
 	// forwarding these into the actual sandbox (via --env or equivalent).

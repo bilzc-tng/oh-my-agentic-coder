@@ -17,9 +17,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 )
@@ -161,8 +163,24 @@ func OmacEnvValue(mount, socket string) string {
 	return "http+unix://" + url.PathEscape(socket) + "/" + mount + "/"
 }
 
-// Exec runs the argv as a child process and waits for it, forwarding stdio.
-// Returns the exit code (0..255). Signals from the child (like killed) map to 128+sig.
+// Exec runs the argv as a child process and waits for it, forwarding stdio
+// and signals.
+//
+// Signal handling:
+//   - When omac runs attached to a terminal, the child is placed in its own
+//     process group AND that group is made the terminal's foreground group
+//     (tcsetpgrp), so Ctrl-C from the keyboard is delivered by the kernel
+//     directly to the child instead of to omac. omac itself temporarily
+//     ignores SIGTTIN/SIGTTOU during this dance and SIGINT/SIGTERM during
+//     the lifetime of the child (it forwards them explicitly; see below).
+//   - When omac is signalled directly (e.g. `kill -INT <omac-pid>`, or in a
+//     non-tty / CI context), the installed handler forwards the signal to
+//     the child's process group so the entire sandbox tree exits cleanly.
+//   - On clean child exit, omac restores the original foreground pgid and
+//     uninstalls its signal handlers.
+//
+// Returns the child's exit code in 0..255. A signal-killed child maps to
+// 128+signum, matching shell convention.
 func Exec(argv []string, extraEnv map[string]string) (int, error) {
 	if len(argv) == 0 {
 		return 1, fmt.Errorf("empty argv")
@@ -179,14 +197,94 @@ func Exec(argv []string, extraEnv map[string]string) (int, error) {
 	}
 	cmd.Env = env
 
-	// Own process group so Ctrl-C reaches the sandbox without crossing back into omac.
+	// Place the child in its own process group. We will (a) forward signals
+	// we receive to that group, and (b) when stdin is a tty, hand the
+	// terminal foreground over to it so Ctrl-C is delivered directly.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	// CRITICAL: install our own signal handlers BEFORE we fork+exec the
+	// child. POSIX execve(2) preserves SIG_IGN through exec, but converts
+	// any explicitly-installed handler to SIG_DFL. So if the parent
+	// shell launched omac with SIGINT ignored (e.g. omac in a background
+	// job, or any non-interactive bash which masks SIGINT for async
+	// children), and we did NOT pre-install a handler, the inherited
+	// SIG_IGN would survive the fork+exec into bash/opencode/etc., and
+	// our pgroup-wide kill(-pgid, SIGINT) would be silently ignored.
+	//
+	// signal.Notify here installs a Go-runtime handler (sa_handler, not
+	// SIG_IGN). After cmd.Start fork+execs, the child resets to SIG_DFL,
+	// which is what we want: SIGINT terminates by default.
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh,
+		syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer signal.Stop(sigCh)
 
 	if err := cmd.Start(); err != nil {
 		return 1, fmt.Errorf("exec %s: %w", argv[0], err)
 	}
-	if err := cmd.Wait(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
+
+	pid := cmd.Process.Pid
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		// Setpgid races with cmd.Start sometimes; on darwin/linux this
+		// almost always succeeds, but if it doesn't we fall back to using
+		// the pid as the pgid (kill(2) accepts that as a single-process
+		// target, which is degraded but not broken).
+		pgid = pid
+	}
+
+	// If we have a controlling terminal, give it to the child's pgid so the
+	// kernel's terminal-driver-driven SIGINT goes there. Ignore SIGTTOU
+	// during tcsetpgrp itself; otherwise we get suspended on the syscall
+	// because we are no longer the foreground group.
+	tty, restoreTTY := claimTerminalFor(pgid)
+	defer restoreTTY()
+	_ = tty
+	done := make(chan struct{})
+	go func() {
+		// Escalation policy when omac itself receives a termination signal:
+		//   1. Forward the original signal to -pgid.
+		//   2. If the child is still alive after 2s, send SIGTERM.
+		//   3. If still alive after another 3s, send SIGKILL.
+		// This makes us robust to children that inherited SIG_IGN for the
+		// signal we forwarded (which can happen when omac was launched
+		// from a non-interactive parent that masked SIGINT for async
+		// children — POSIX execve preserves SIG_IGN).
+		var first bool
+		for {
+			select {
+			case <-done:
+				return
+			case s := <-sigCh:
+				if ss, ok := s.(syscall.Signal); ok {
+					_ = syscall.Kill(-pgid, ss)
+					if !first {
+						first = true
+						go func() {
+							select {
+							case <-done:
+								return
+							case <-time.After(2 * time.Second):
+							}
+							_ = syscall.Kill(-pgid, syscall.SIGTERM)
+							select {
+							case <-done:
+								return
+							case <-time.After(3 * time.Second):
+							}
+							_ = syscall.Kill(-pgid, syscall.SIGKILL)
+						}()
+					}
+				}
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	close(done)
+
+	if waitErr != nil {
+		if ee, ok := waitErr.(*exec.ExitError); ok {
 			if ws, ok := ee.Sys().(syscall.WaitStatus); ok {
 				if ws.Exited() {
 					return ws.ExitStatus(), nil
@@ -197,7 +295,7 @@ func Exec(argv []string, extraEnv map[string]string) (int, error) {
 			}
 			return ee.ExitCode(), nil
 		}
-		return 1, err
+		return 1, waitErr
 	}
 	return 0, nil
 }
