@@ -16,11 +16,20 @@
 /.ruff_cache/
 
 # Per-workdir runtime state managed by `omac register` / `omac start`.
-# The registry file itself may be committed per-project (it's small and
-# meant to be reviewable), but the flock and any stray temp files should
-# not be.
+# The registry file (`.opencode/sidecar.json`) is per-environment state:
+# it points at skill_dirs that exist on the user's machine and was written
+# at the time *that user* ran `omac register`. It is intentionally NOT
+# committed; users register skills themselves on first use.
+/.opencode/sidecar.json
 /.opencode/sidecar.json.lock
 /.opencode/sidecar.json.tmp-*
+
+# Stray package-manager files written into .opencode/ by surrounding
+# tooling (npm/bun/etc.) that have nothing to do with omac.
+/.opencode/package-lock.json
+/.opencode/package.json
+/.opencode/node_modules/
+/.opencode/bun.lock
 
 # Runtime state directory (created by `omac start`; the actual path lives
 # under $TMPDIR, but keep a guard here in case the user overrides TMPDIR
