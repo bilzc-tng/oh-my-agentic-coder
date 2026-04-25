@@ -36,7 +36,7 @@ type SidecarSpec struct {
 	Command        []string
 	EnvPassthrough []string
 	Secrets        map[string]secrets.Secret // name → value
-	// Config holds non-secret values from .opencode/skill-config.json
+	// Config holds non-secret values from .opencode/skill-config.yaml
 	// keyed by env-var name. These are injected into the sidecar's
 	// environment alongside Secrets but are surfaced from a plain JSON
 	// file, not the OS keychain. Secrets take precedence on collision

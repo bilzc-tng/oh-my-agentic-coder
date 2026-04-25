@@ -129,7 +129,7 @@ func runStart(args []string, env *Env) int {
 	}
 
 	// 3. Resolve secrets from keychain and non-secret config from
-	//    .opencode/skill-config.json. Both feed the sidecar's env;
+	//    .opencode/skill-config.yaml. Both feed the sidecar's env;
 	//    secrets win on collision (validated at meta load).
 	type withSecrets struct {
 		resolved

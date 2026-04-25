@@ -1,6 +1,6 @@
 // Package config defines the on-disk configuration formats used by omac:
 // skill meta.yaml (with the sidecar block), the per-workdir sidecar.json
-// registry, and the oh-my-agentic-coder.json launcher config.
+// registry, and the oh-my-agentic-coder.yaml launcher config.
 package config
 
 import (
@@ -71,7 +71,7 @@ const (
 
 // ConfigSpec describes one non-secret configuration field that omac
 // prompts for at register time. Unlike secrets, the resulting value is
-// stored in plain text in <workdir>/.opencode/skill-config.json (not
+// stored in plain text in <workdir>/.opencode/skill-config.yaml (not
 // the OS keychain) and surfaced to the sidecar via the same env-var
 // injection mechanism as secrets.
 //
@@ -79,6 +79,8 @@ const (
 // secret: API base URLs, region names, feature flags, retry limits.
 // Anything that would be embarrassing in a screenshot belongs in
 // `secrets:` instead.
+//
+// Stored on disk as plain YAML in <workdir>/.opencode/skill-config.yaml.
 type ConfigSpec struct {
 	Name           string          `yaml:"name"`
 	Description    string          `yaml:"description,omitempty"`

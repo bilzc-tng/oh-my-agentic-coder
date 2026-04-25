@@ -100,7 +100,7 @@ sidecar:
       multiline: false                   # optional: PEM keys etc.
 
   # Declared non-secret config fields. `omac register` prompts (echoing input),
-  # stores in plain JSON under <workdir>/.opencode/skill-config.json, and
+  # stores in plain YAML under <workdir>/.opencode/skill-config.yaml, and
   # injects at sidecar start as env vars exactly the same way as secrets.
   # See §8 below for the full type system.
   config:
@@ -169,7 +169,7 @@ Your sidecar is a normal HTTP server. Requirements:
 | `SIDECAR_SKILL`  | The skill name (handy for log lines).                  |
 | `OMAC_WORKDIR`   | Absolute path of the workdir omac was invoked in.      |
 | Each declared secret | The value from the keychain (or `env_passthrough` host env). |
-| Each declared config field | The value from `.opencode/skill-config.json` (canonicalized — see §8). |
+| Each declared config field | The value from `.opencode/skill-config.yaml` (canonicalized — see §8). |
 
 ### Minimal Python sidecar
 
@@ -380,8 +380,8 @@ The lifecycle:
 
 1. `omac register` prompts for every declared field (echoing input
    visibly, **not** masked — these are not secret).
-2. Values are stored in plain JSON under
-   `<workdir>/.opencode/skill-config.json`, mode `0600`.
+2. Values are stored in plain YAML under
+   `<workdir>/.opencode/skill-config.yaml`, mode `0600`.
 3. At `omac start` time the values are injected into the sidecar's
    environment alongside secrets, so the sidecar reads them with
    `os.environ.get("FIELD_NAME")` exactly like a secret.
@@ -443,7 +443,7 @@ Two ways:
 omac register --reprompt-fields my-skill   # interactive, keeps secrets
 ```
 
-…or edit `.opencode/skill-config.json` directly (mode 0600 — chmod it
+…or edit `.opencode/skill-config.yaml` directly (mode 0600 — chmod it
 back if you `chown` it). Re-running `omac start` picks up the new
 values on the next sidecar spawn.
 
@@ -458,7 +458,7 @@ For non-interactive flows (CI provisioning, scripted setup) the
   `--no-secrets`).
 
 `omac deregister --purge-fields` drops a skill's entries from
-`skill-config.json` (in addition to `--purge-secrets` for the
+`skill-config.yaml` (in addition to `--purge-secrets` for the
 keychain).
 
 ### 9.5 When to use `secrets:` vs `config:`

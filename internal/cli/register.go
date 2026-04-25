@@ -96,8 +96,8 @@ func runRegister(args []string, env *Env) int {
 		}
 	}
 
-	// 2b. Non-secret config fields. Stored in plain JSON under
-	//     <workdir>/.opencode/skill-config.json (NOT the keychain).
+	// 2b. Non-secret config fields. Stored in plain YAML under
+	//     <workdir>/.opencode/skill-config.yaml (NOT the keychain).
 	if !*noFields && len(meta.Sidecar.Config) > 0 {
 		fromFile, err := loadFieldsFile(*fieldsFromPath)
 		if err != nil {
@@ -330,7 +330,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 
 	// 3. Env-based non-interactive supply: OMAC_CONFIG_<NAME>.
 	//    Distinct from OMAC_SECRET_<NAME> so a misuse can't accidentally
-	//    leak a secret into the world-readable skill-config.json.
+	//    leak a secret into the world-readable skill-config.yaml.
 	if v, ok := os.LookupEnv("OMAC_CONFIG_" + spec.Name); ok {
 		canon, err := canonicalizeFieldValue(spec, v)
 		if err != nil {

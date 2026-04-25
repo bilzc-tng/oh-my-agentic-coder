@@ -84,7 +84,7 @@ go install github.com/tngtech/oh-my-agentic-coder/cmd/omac@latest
 cmd/omac/                  Entrypoint.
 internal/cli/              Subcommand dispatch (register/deregister/list/
                            secrets/start/doctor/version).
-internal/config/           meta.yaml + oh-my-agentic-coder.json types.
+internal/config/           meta.yaml + oh-my-agentic-coder.yaml types.
 internal/registry/         .opencode/sidecar.json (atomic writes, flock).
 internal/keychain/         Thin wrapper over github.com/zalando/go-keyring.
 internal/secrets/          Secret type (redacted Stringer, zeroize) + masked prompt.
@@ -366,11 +366,12 @@ set, add `OMAC_*` to that list or the variables will be filtered.)
 | `nono-netprofile`   | As above plus `--network-profile opencode`                                                 | Restrict outbound HTTP to nono's `opencode` profile domains.  |
 | `no-sandbox-debug`  | *(no nono — runs inner command directly)*                                                  | Local debugging only. Not a security boundary.                |
 
-You can add your own profiles by creating `.opencode/oh-my-agentic-coder.json`
-in the workdir. See the design doc §14 for the full launcher-config
-schema. Available placeholders: `{{socket}}`, `{{socket_dir}}`,
-`{{tcp_port}}`, `{{workdir}}`, `{{skills_csv}}`, `{{inner_cmd}}`,
-`{{inner_args}}`, `{{per_skill_env_flags}}`.
+You can add your own profiles by creating
+`.opencode/oh-my-agentic-coder.yaml` in the workdir (or the user-global
+`~/.config/omac/config.yaml`). See the design doc §14 for the full
+launcher-config schema. Available placeholders: `{{socket}}`,
+`{{socket_dir}}`, `{{tcp_port}}`, `{{workdir}}`, `{{skills_csv}}`,
+`{{inner_cmd}}`, `{{inner_args}}`, `{{per_skill_env_flags}}`.
 
 ### Combining with other nono flags
 

@@ -133,12 +133,48 @@ func TestStore_SaveCreatesDotOpencodeDir(t *testing.T) {
 	}
 }
 
-func TestStore_BadJSON(t *testing.T) {
+// TestStore_FileIsYAML asserts that Save produces a YAML document
+// (not JSON or some other shape). We don't pin the exact byte layout
+// — yaml.v3 may legitimately reformat between minor releases — but we
+// do assert that the file:
+//   - has the canonical .yaml extension via Path()
+//   - contains the human-friendly `key: value` form rather than JSON's
+//     `"key": "value"` (which would slip through round-trip because
+//     YAML is a JSON superset)
+func TestStore_FileIsYAML(t *testing.T) {
+	dir := t.TempDir()
+	if filepath.Ext(Path(dir)) != ".yaml" {
+		t.Fatalf("Path %q must end in .yaml", Path(dir))
+	}
+	s := &Store{}
+	s.Set("echo-rest", "ECHO_GREETING", "hello")
+	if err := Save(dir, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	raw, err := os.ReadFile(Path(dir))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(raw)
+	// YAML wire form: bare keys, no surrounding {}.
+	if strings.Contains(got, `"echo-rest": {`) || strings.HasPrefix(got, "{") {
+		t.Errorf("Save produced JSON-shaped output, want YAML.\n%s", got)
+	}
+	if !strings.Contains(got, "echo-rest:") || !strings.Contains(got, "ECHO_GREETING: hello") {
+		t.Errorf("Save output does not look like YAML.\n%s", got)
+	}
+}
+
+// TestStore_BadYAML covers the malformed-input path. The bytes below
+// are deliberately invalid YAML (mismatched flow mapping) so the
+// parser raises a syntax error rather than producing an unexpected
+// (but valid) document.
+func TestStore_BadYAML(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, ".opencode"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(Path(dir), []byte("{not json"), 0o600); err != nil {
+	if err := os.WriteFile(Path(dir), []byte("{ unterminated: [flow,"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err := Load(dir)

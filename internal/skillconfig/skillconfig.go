@@ -1,11 +1,11 @@
 // Package skillconfig manages the per-workdir
-// .opencode/skill-config.json file. This is the home of non-secret
+// .opencode/skill-config.yaml file. This is the home of non-secret
 // skill configuration (API base URLs, region names, feature flags,
 // retry limits — anything that wouldn't be embarrassing in a
 // screenshot).
 //
 // Secret credentials must continue to use internal/keychain. The
-// skill-config file is plain JSON, mode 0600, and is meant to be
+// skill-config file is plain YAML, mode 0600, and is meant to be
 // readable by the user (and committable to a private workdir if they
 // choose) — it is NOT a secret store.
 //
@@ -15,29 +15,31 @@
 package skillconfig
 
 import (
-	"encoding/json"
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SchemaVersion is the current on-disk format version.
 const SchemaVersion = 1
 
-// Store is the root object of skill-config.json. The map is keyed by
+// Store is the root object of skill-config.yaml. The map is keyed by
 // skill name; each value is keyed by field name and stores the
 // canonical string form of the field's value (the type is recovered
 // from meta.yaml at start time).
 type Store struct {
-	Version int                          `json:"version"`
-	Skills  map[string]map[string]string `json:"skills"`
+	Version int                          `yaml:"version"`
+	Skills  map[string]map[string]string `yaml:"skills"`
 }
 
 // Path returns the skill-config file path for a given workdir.
 func Path(workdir string) string {
-	return filepath.Join(workdir, ".opencode", "skill-config.json")
+	return filepath.Join(workdir, ".opencode", "skill-config.yaml")
 }
 
 // Load reads the file at workdir. A missing file returns an empty Store.
@@ -51,7 +53,7 @@ func Load(workdir string) (*Store, error) {
 		return nil, fmt.Errorf("read skill-config: %w", err)
 	}
 	var s Store
-	if err := json.Unmarshal(raw, &s); err != nil {
+	if err := yaml.Unmarshal(raw, &s); err != nil {
 		return nil, fmt.Errorf("parse skill-config: %w", err)
 	}
 	if s.Version == 0 {
@@ -77,14 +79,23 @@ func Save(workdir string, s *Store) error {
 		return fmt.Errorf("ensure .opencode dir: %w", err)
 	}
 
-	// Marshal with deterministic key ordering so diffs are clean.
-	// encoding/json's encoder sorts map keys alphabetically already
-	// (since Go 1.12), so MarshalIndent on Store gives stable output.
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
+	// yaml.v3's encoder sorts map keys alphabetically by default, so
+	// MarshalIndent gives stable output across runs and across Go
+	// versions. Encode with a 2-space indent for visual parity with
+	// hand-edited files.
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(s); err != nil {
+		_ = enc.Close()
 		return fmt.Errorf("marshal skill-config: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, "skill-config.json.tmp-*")
+	if err := enc.Close(); err != nil {
+		return fmt.Errorf("close yaml encoder: %w", err)
+	}
+	data := buf.Bytes()
+
+	tmp, err := os.CreateTemp(dir, "skill-config.yaml.tmp-*")
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}

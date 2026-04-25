@@ -1,23 +1,30 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
-// LauncherConfig is the oh-my-agentic-coder.json file.
+// LauncherConfig is the oh-my-agentic-coder.yaml file.
+//
+// Both `yaml:` and `json:` struct tags are kept on every field so the
+// type stays compatible if a caller ever needs to dump the config back
+// out as JSON (e.g. for diagnostics). YAML is the canonical wire
+// format on disk; JSON tags exist for "free" compatibility because
+// gopkg.in/yaml.v3 ignores them and encoding/json honors them.
 type LauncherConfig struct {
-	Sandbox SandboxConfig `json:"sandbox"`
-	Facade  FacadeConfig  `json:"facade"`
+	Sandbox SandboxConfig `yaml:"sandbox" json:"sandbox"`
+	Facade  FacadeConfig  `yaml:"facade"  json:"facade"`
 }
 
 // SandboxConfig declares named sandbox profiles.
 type SandboxConfig struct {
-	DefaultProfile string                    `json:"default_profile"`
-	Profiles       map[string]SandboxProfile `json:"profiles"`
+	DefaultProfile string                    `yaml:"default_profile" json:"default_profile"`
+	Profiles       map[string]SandboxProfile `yaml:"profiles"        json:"profiles"`
 }
 
 // SandboxProfile describes how to launch the sandbox for a given runtime.
@@ -27,15 +34,15 @@ type SandboxProfile struct {
 	//   {{skills_csv}}, {{per_skill_env_flags}}, {{workdir}}
 	// Tokens that expand to multiple argv entries (inner_args,
 	// per_skill_env_flags) must stand alone in their slot.
-	Command  []string `json:"command"`
-	InnerCmd []string `json:"inner_cmd"`
+	Command  []string `yaml:"command"   json:"command"`
+	InnerCmd []string `yaml:"inner_cmd" json:"inner_cmd"`
 }
 
 // FacadeConfig tunes the reverse proxy.
 type FacadeConfig struct {
-	IdleTimeoutSecs    int      `json:"idle_timeout_secs"`
-	MaxBodyBytes       int64    `json:"max_body_bytes"`
-	BaseEnvPassthrough []string `json:"base_env_passthrough"`
+	IdleTimeoutSecs    int      `yaml:"idle_timeout_secs"    json:"idle_timeout_secs"`
+	MaxBodyBytes       int64    `yaml:"max_body_bytes"       json:"max_body_bytes"`
+	BaseEnvPassthrough []string `yaml:"base_env_passthrough" json:"base_env_passthrough"`
 }
 
 // DefaultLauncherConfig returns a config that ships as the compiled-in default.
@@ -144,15 +151,21 @@ func DefaultLauncherConfig() LauncherConfig {
 	}
 }
 
-// LoadLauncher loads the launcher config from workdir/.opencode/oh-my-agentic-coder.json
-// or, failing that, $XDG_CONFIG_HOME/omac/config.json (~/.config/omac/config.json).
+// LoadLauncher loads the launcher config from
+// <workdir>/.opencode/oh-my-agentic-coder.yaml or, failing that,
+// $XDG_CONFIG_HOME/omac/config.yaml (~/.config/omac/config.yaml).
 // If neither exists, the compiled-in default is returned.
+//
+// The config format is YAML (gopkg.in/yaml.v3). YAML is a strict
+// superset of JSON, so existing JSON-shaped files continue to parse
+// correctly — handy if a user has an inline `omac` config snippet
+// they want to paste in. The .yaml extension is the canonical name.
 func LoadLauncher(workdir string) (LauncherConfig, string, error) {
 	candidates := []string{
-		filepath.Join(workdir, ".opencode", "oh-my-agentic-coder.json"),
+		filepath.Join(workdir, ".opencode", "oh-my-agentic-coder.yaml"),
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		candidates = append(candidates, filepath.Join(home, ".config", "omac", "config.json"))
+		candidates = append(candidates, filepath.Join(home, ".config", "omac", "config.yaml"))
 	}
 	for _, p := range candidates {
 		raw, err := os.ReadFile(p)
@@ -163,7 +176,7 @@ func LoadLauncher(workdir string) (LauncherConfig, string, error) {
 			return LauncherConfig{}, "", fmt.Errorf("read %s: %w", p, err)
 		}
 		var lc LauncherConfig
-		if err := json.Unmarshal(raw, &lc); err != nil {
+		if err := yaml.Unmarshal(raw, &lc); err != nil {
 			return LauncherConfig{}, "", fmt.Errorf("parse %s: %w", p, err)
 		}
 		lc = mergeDefaults(lc)

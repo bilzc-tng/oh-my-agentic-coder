@@ -447,7 +447,7 @@ Skills document the specific endpoints their sidecar exposes; `omac` does not pr
 
 ## 10. CLI reference
 
-All commands are idempotent unless noted. All accept `--workdir <dir>` (default: cwd) and `--config <path>` (default: `<workdir>/.opencode/oh-my-agentic-coder.json`, falling back to `~/.config/omac/config.json`).
+All commands are idempotent unless noted. All accept `--workdir <dir>` (default: cwd) and `--config <path>` (default: `<workdir>/.opencode/oh-my-agentic-coder.yaml`, falling back to `~/.config/omac/config.yaml`).
 
 ### 10.1 `omac register <skill>`
 
@@ -665,56 +665,68 @@ Step 5c detail: `env_passthrough` is a strict allowlist. Anything not listed is 
 
 ### 14.1 Config file
 
-Default location: `<workdir>/.opencode/oh-my-agentic-coder.json`, falling back to `~/.config/omac/config.json`.
+Default location: `<workdir>/.opencode/oh-my-agentic-coder.yaml`, falling back to `~/.config/omac/config.yaml`.
 
 Shape:
 
-```json
-{
-  "sandbox": {
-    "default_profile": "nono",
-    "profiles": {
-      "nono": {
-        "command": [
-          "nono", "run",
-          "--allow-cwd",
-          "--profile", "tng-sandbox",
-          "--allow-file", "{{socket}}",
-          "--env", "OMAC_SOCKET={{socket}}",
-          "--env", "OMAC_SKILLS={{skills_csv}}",
-          "{{per_skill_env_flags}}",
-          "--",
-          "{{inner_cmd}}", "{{inner_args}}"
-        ],
-        "inner_cmd": ["opencode"]
-      },
-      "bubblewrap": {
-        "command": [
-          "bwrap",
-          "--ro-bind", "/", "/",
-          "--dev", "/dev",
-          "--proc", "/proc",
-          "--bind", "{{socket_dir}}", "{{socket_dir}}",
-          "--setenv", "OMAC_SOCKET", "{{socket}}",
-          "--setenv", "OMAC_SKILLS", "{{skills_csv}}",
-          "--",
-          "{{inner_cmd}}", "{{inner_args}}"
-        ],
-        "inner_cmd": ["opencode"]
-      },
-      "no-sandbox-debug": {
-        "command": ["{{inner_cmd}}", "{{inner_args}}"],
-        "inner_cmd": ["bash"]
-      }
-    }
-  },
-  "facade": {
-    "idle_timeout_secs": 300,
-    "max_body_bytes": 10485760,
-    "base_env_passthrough": ["PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"]
-  }
-}
+```yaml
+sandbox:
+  default_profile: nono
+  profiles:
+    nono:
+      command:
+        - nono
+        - run
+        - --allow-cwd
+        - --profile
+        - tng-sandbox
+        - --allow-file
+        - "{{socket}}"
+        - --env
+        - "OMAC_SOCKET={{socket}}"
+        - --env
+        - "OMAC_SKILLS={{skills_csv}}"
+        - "{{per_skill_env_flags}}"
+        - --
+        - "{{inner_cmd}}"
+        - "{{inner_args}}"
+      inner_cmd: [opencode]
+
+    bubblewrap:
+      command:
+        - bwrap
+        - --ro-bind
+        - /
+        - /
+        - --dev
+        - /dev
+        - --proc
+        - /proc
+        - --bind
+        - "{{socket_dir}}"
+        - "{{socket_dir}}"
+        - --setenv
+        - OMAC_SOCKET
+        - "{{socket}}"
+        - --setenv
+        - OMAC_SKILLS
+        - "{{skills_csv}}"
+        - --
+        - "{{inner_cmd}}"
+        - "{{inner_args}}"
+      inner_cmd: [opencode]
+
+    no-sandbox-debug:
+      command: ["{{inner_cmd}}", "{{inner_args}}"]
+      inner_cmd: [bash]
+
+facade:
+  idle_timeout_secs: 300
+  max_body_bytes: 10485760
+  base_env_passthrough: [PATH, HOME, USER, LANG, LC_ALL, LC_CTYPE, TMPDIR]
 ```
+
+> Historical note: this example shows the `--env` flag for completeness with how nono profiles were originally written. Current `omac` versions inject `OMAC_*` into the runtime's process environment instead (nono propagates parent env to the inner process by default). The reference profile in `internal/config/launcher.go` is authoritative.
 
 ### 14.2 Placeholders
 

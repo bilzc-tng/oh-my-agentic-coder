@@ -14,7 +14,7 @@ func runDeregister(args []string, env *Env) int {
 	fs.SetOutput(env.Stderr)
 	var (
 		purge       = fs.Bool("purge-secrets", false, "Also delete every omac/<skill>/* entry from the keychain.")
-		purgeFields = fs.Bool("purge-fields", false, "Also delete this skill's entries from .opencode/skill-config.json.")
+		purgeFields = fs.Bool("purge-fields", false, "Also delete this skill's entries from .opencode/skill-config.yaml.")
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: omac deregister <skill> [--purge-secrets] [--purge-fields]")
