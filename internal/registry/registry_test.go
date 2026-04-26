@@ -14,7 +14,7 @@ func TestRoundTrip(t *testing.T) {
 	r.Upsert(Entry{
 		Name:                "slack",
 		SkillDir:            ".opencode/skills/slack",
-		MetaHash:            "sha256:abc",
+		BundleHash:          "sha256:abc",
 		RegisteredAt:        time.Unix(1700000000, 0).UTC(),
 		DeclaredSecretNames: []string{"SLACK_BOT_TOKEN"},
 	})

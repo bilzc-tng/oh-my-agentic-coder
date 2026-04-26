@@ -61,9 +61,9 @@ func runRegister(args []string, env *Env) int {
 		fmt.Fprintf(env.Stderr, "omac register: skill %q has no sidecar block; nothing to register\n", skillName)
 		return ExitMisuse
 	}
-	metaHash, err := config.HashMetaFile(metaPath)
+	bundleHash, err := config.BundleHash(skillDir)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac register: hash meta:", err)
+		fmt.Fprintln(env.Stderr, "omac register: bundle hash:", err)
 		return ExitIOError
 	}
 
@@ -149,14 +149,14 @@ func runRegister(args []string, env *Env) int {
 			return err
 		}
 		if existing, _ := reg.Find(skillName); existing != nil {
-			if existing.MetaHash != metaHash && !*force {
-				return fmt.Errorf("already registered with a different meta_hash; pass --force to update")
+			if existing.BundleHash != bundleHash && !*force {
+				return fmt.Errorf("already registered with a different bundle_hash; pass --force to update")
 			}
 		}
 		reg.Upsert(registry.Entry{
 			Name:                skillName,
 			SkillDir:            rel(env.Workdir, skillDir),
-			MetaHash:            metaHash,
+			BundleHash:          bundleHash,
 			RegisteredAt:        time.Now().UTC(),
 			DeclaredSecretNames: declaredNames,
 		})

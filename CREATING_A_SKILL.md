@@ -265,8 +265,8 @@ can discover the facade without having to know its hash-derived path:
 | `OMAC_BASE` | `http://127.0.0.1:<port>/` | Facade root, TCP form. |
 | `OMAC_SKILLS` | e.g. `echo,slack,himalaya-email` | Comma-separated mount names. Empty when no skills are registered. |
 | `OMAC_VERSION` | e.g. `0.1.5` | The omac binary's version string. |
-| `OMAC_<MOUNT>_BASE` | `http://127.0.0.1:<port>/<mount>/` | **TCP** URL for this skill. Prefer this one — it works under nono proxy mode on macOS, where Seatbelt's `(deny network*)` blocks Unix-socket `connect(2)`. |
-| `OMAC_<MOUNT>_SOCKET_BASE` | `http+unix://%2Ftmp%2Fomac-<hash>%2Fbridge.sock/<mount>/` | Unix-socket form. Lower overhead when available; fails on macOS under nono proxy mode. |
+| `OMAC_<MOUNT>_BASE` | `http://127.0.0.1:<port>/<mount>` | **TCP** URL for this skill, without a trailing slash. Prefer this one — it works under nono proxy mode on macOS, where Seatbelt's `(deny network*)` blocks Unix-socket `connect(2)`. |
+| `OMAC_<MOUNT>_SOCKET_BASE` | `http+unix://%2Ftmp%2Fomac-<hash>%2Fbridge.sock/<mount>` | Unix-socket form, without a trailing slash. Lower overhead when available; fails on macOS under nono proxy mode. |
 
 The `<MOUNT>` portion of the per-skill var names is derived from the
 mount string by uppercasing letters and replacing every non-alphanumeric
@@ -323,7 +323,55 @@ omac start                    # default profile: nono
 omac start --sandbox nono-netprofile   # network-restricted variant
 ```
 
-### 7.4 Inspect logs on failure
+### 7.4 What `omac start` verifies before running
+
+`omac start` reconciles the on-disk state against what was registered
+and refuses to spawn anything if the gap is wider than the user has
+explicitly accepted. Four classes of drift, in the order they're
+checked:
+
+1. **Skill directory deleted** (registered skill no longer on disk).
+   Auto-deregistered silently, with a one-line `[info]` log message
+   and a hint about how to purge the leftover secrets/config:
+   ```
+   [info] my-skill: skill directory missing on disk; auto-deregistered.
+   Stored secrets and config remain. To purge: omac deregister
+   --purge-secrets --purge-fields my-skill
+   ```
+   `start` continues with whatever skills remain. The kept secrets +
+   config are insurance against an accidental `rm -rf` on the skills
+   tree.
+
+2. **Unregistered skill on disk** (a directory with `meta.yaml` under
+   `.opencode/skills/` that omac has never seen). Refuses to start;
+   prints the exact register command for each one. Re-registration is
+   mandatory because it's the only point at which secret-prompting and
+   config-prompting happen.
+
+3. **Bundle hash drift** (the registered skill's source files changed
+   since register). The bundle hash covers `meta.yaml` and every
+   sidecar source file (helper modules, install scripts) — but
+   excludes runtime artifacts like `__pycache__/`, `.venv/`,
+   `node_modules/`, `.git/`, `.DS_Store`, `*.pyc`, editor swap files,
+   so a `pip install` doesn't trip detection. Refuses unless
+   `--accept-skill-changes` is passed (or you re-register with
+   `omac register --force my-skill`). The flag exists for the case
+   where you've intentionally edited the skill in place during
+   development and don't want to re-prompt.
+
+4. **Missing required config field** (a `config:` entry with
+   `required: true` that has no stored value, no `default:`, and no
+   resolvable `default_from_env:`). Refuses with the list of missing
+   names and the exact register command:
+   ```
+   omac start: my-skill: required config field(s) missing: API_BASE_URL, REGION
+   Run: omac register --reprompt-fields my-skill
+   ```
+
+In all refusal cases the exit is non-zero so wrapper scripts can
+catch the condition and prompt the user.
+
+### 7.5 Inspect logs on failure
 
 If a request returns `503 X-Omac-Reason: sidecar-down`, look at:
 
@@ -333,7 +381,7 @@ $TMPDIR/omac-<workdir-hash>/logs/<skill>.log
 
 That file captures the sidecar's stderr/stdout.
 
-### 7.5 Use a smoke-test client
+### 7.6 Use a smoke-test client
 
 Model your manual smoke test on `demo-client.sh` in the repo root. It
 hits every route on the echo-rest reference skill via both the TCP and

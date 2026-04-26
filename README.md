@@ -167,12 +167,17 @@ omac [--workdir <dir>] <subcommand> [flags] [args]
     show <skill> [--json]   resolved config + secret fingerprints
     get  <skill> <field>    one resolved value, suitable for $(...)
 
-  start        Spawn sidecars → bind socket → exec sandbox runtime. Flags:
+  start        Spawn sidecars → bind socket → exec sandbox runtime. Refuses
+               to start if any skill under .opencode/skills/ is unregistered,
+               or if a registered skill's bundle changed since register, or
+               if a required config field is unresolvable. Auto-deregisters
+               (silently) skills whose directory has vanished; secrets +
+               config persist for safety. Flags:
                  --sandbox <profile>     pick a sandbox profile
                  --inner <cmd>           override inner_cmd
                  --no-sandbox            debug: run inner cmd directly
                  --keep-running          don't stop sidecars on exit
-                 --accept-meta-changes   tolerate meta_hash drift
+                 --accept-skill-changes  tolerate bundle_hash drift
                  --verbose               lifecycle logging
 
   doctor       Sanity checks: config, registry, binaries, secrets, sandbox.
@@ -253,7 +258,7 @@ loopback `connect(2)`:
 
 ```
 OMAC_SOCKET    = /tmp/omac-<hash>/bridge.sock
-OMAC_ECHO_BASE = http+unix://%2Ftmp%2Fomac-<hash>%2Fbridge.sock/echo/
+OMAC_ECHO_BASE = http://127.0.0.1:<port>/echo
 --- GET /echo/status ---      {"ok":true,"skill":"echo-rest"}
 --- GET /echo/whoami ---      {"skill":"echo-rest","secret_present":true,"secret_fingerprint":"sha256:..."}
 --- POST /echo/echo ---       {"skill":"echo-rest","secret_fingerprint":"sha256:...","you_sent":{"hello":"from sandbox","n":7}}
@@ -319,8 +324,8 @@ skill plus three top-level ones:
 | `OMAC_BASE` | `http://127.0.0.1:<port>/` | TCP transport (preferred). |
 | `OMAC_HOST` / `OMAC_PORT` | `127.0.0.1` / `<port>` | Components of `OMAC_BASE`. |
 | `OMAC_SOCKET` | `/tmp/omac-<hash>/bridge.sock` | Unix transport (fallback). |
-| `OMAC_<SKILL>_BASE` | `http://127.0.0.1:<port>/<skill>/` | Per-skill TCP URL. |
-| `OMAC_<SKILL>_SOCKET_BASE` | `http+unix://%2F.../<skill>/` | Per-skill Unix URL. |
+| `OMAC_<SKILL>_BASE` | `http://127.0.0.1:<port>/<skill>` | Per-skill TCP URL, without a trailing slash. |
+| `OMAC_<SKILL>_SOCKET_BASE` | `http+unix://%2F.../<skill>` | Per-skill Unix URL, without a trailing slash. |
 | `OMAC_SKILLS` | comma-separated mounts | Introspection. |
 
 Why both:
@@ -408,7 +413,7 @@ launcher-config schema. Available placeholders: `{{socket}}`,
 6. From inside the sandbox the agent uses `$OMAC_<SKILL>_BASE`:
 
     ```bash
-    curl -sS "${OMAC_ECHO_BASE}whoami"          # TCP, works under proxy mode
+    curl -sS "${OMAC_ECHO_BASE}/whoami"         # TCP, works under proxy mode
     curl -sS --unix-socket "$OMAC_SOCKET" \     # Unix fallback
          http://x/echo/whoami
     ```

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,12 +27,12 @@ func runStart(args []string, env *Env) int {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	var (
-		profile           = fs.String("sandbox", "", "Name of a sandbox profile from the launcher config.")
-		innerCmdOverride  = fs.String("inner", "", "Override inner_cmd's executable.")
-		noSandbox         = fs.Bool("no-sandbox", false, "Run inner command directly, without a sandbox (debug only).")
-		keepRunning       = fs.Bool("keep-running", false, "Do not stop sidecars when the inner command exits.")
-		acceptMetaChanges = fs.Bool("accept-meta-changes", false, "Tolerate meta_hash drift.")
-		verbose           = fs.Bool("verbose", false, "Verbose lifecycle logging.")
+		profile            = fs.String("sandbox", "", "Name of a sandbox profile from the launcher config.")
+		innerCmdOverride   = fs.String("inner", "", "Override inner_cmd's executable.")
+		noSandbox          = fs.Bool("no-sandbox", false, "Run inner command directly, without a sandbox (debug only).")
+		keepRunning        = fs.Bool("keep-running", false, "Do not stop sidecars when the inner command exits.")
+		acceptSkillChanges = fs.Bool("accept-skill-changes", false, "Tolerate bundle_hash drift in registered skills (proceed even if the on-disk skill differs from what was registered).")
+		verbose            = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: omac start [flags] [-- inner args...]")
@@ -75,20 +76,60 @@ func runStart(args []string, env *Env) int {
 		return ExitConfigInvalid
 	}
 
-	// 2. Load registry and every meta.
+	// 2. Reconcile registry against on-disk reality.
 	//
-	// An empty registry is NOT an error: omac is still useful as a thin
-	// sandbox launcher even before any skills have been registered. In
-	// that case there's nothing to spawn (no sidecars, no facade routes)
-	// but the rest of the pipeline (facade listener, sandbox exec) still
-	// makes sense and the inner command runs as configured by the
-	// sandbox profile. We just emit a one-line notice so the user
-	// understands why no facade traffic will work.
+	// Four kinds of drift are checked, in this order, before we spawn
+	// anything. The order matters: pruning deleted skills first
+	// shrinks the working set; then we make sure every on-disk skill
+	// is registered; then we hash-check each registration; finally we
+	// verify required config fields are resolvable. Any class of drift
+	// short-circuits the start unless the user opts in (only bundle
+	// drift is opt-in-able, with --accept-skill-changes).
+	//
+	// An empty registry is NOT in itself an error: omac still works as
+	// a thin sandbox launcher even before any skills are registered.
 	reg, err := registry.Load(env.Workdir)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: registry:", err)
 		return ExitIOError
 	}
+
+	// 2a. Auto-deregister skills whose source directory has vanished.
+	//     This is the only drift we silently fix; the user asked for
+	//     a log line and a hint about purging the leftover state, but
+	//     no exit-non-zero. Secrets and skill-config entries are
+	//     intentionally KEPT so an accidental `rm -rf` on the skills
+	//     dir doesn't lose values; the hint tells the user how to
+	//     purge them later.
+	pruned, err := autoDeregisterMissing(env, reg)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start: auto-deregister:", err)
+		return ExitIOError
+	}
+	for _, p := range pruned {
+		fmt.Fprintf(env.Stderr,
+			"[info] %s: skill directory missing on disk; auto-deregistered. "+
+				"Stored secrets and config remain. To purge: omac deregister --purge-secrets --purge-fields %s\n",
+			p, p)
+	}
+
+	// 2b. Refuse if any unregistered skill exists under .opencode/skills/.
+	//     "Skill" here means a directory with a meta.yaml. The user
+	//     must explicitly register each one (so registration prompts,
+	//     keychain seeding, etc. don't get silently skipped).
+	unregistered, err := findUnregisteredSkills(env.Workdir, reg)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start: scan skills:", err)
+		return ExitIOError
+	}
+	if len(unregistered) > 0 {
+		fmt.Fprintln(env.Stderr, "omac start: unregistered skills found in this workdir:")
+		for _, name := range unregistered {
+			fmt.Fprintf(env.Stderr, "  %s — run: omac register %s\n", name, name)
+		}
+		return ExitPrerequisiteMissing
+	}
+
 	if len(reg.Registered) == 0 {
 		fmt.Fprintln(env.Stderr,
 			"omac start: no skills registered in this workdir; "+
@@ -116,13 +157,19 @@ func runStart(args []string, env *Env) int {
 			fmt.Fprintf(env.Stderr, "omac start: %s: meta no longer has a sidecar block\n", e.Name)
 			return ExitConfigInvalid
 		}
-		hash, err := config.HashMetaFile(metaPath)
+		// 2c. Bundle-hash drift. The bundle covers meta.yaml and the
+		//     sidecar source files; runtime artifacts (caches, venvs)
+		//     are excluded so a `pip install` doesn't trip detection.
+		bundle, err := config.BundleHash(absDir)
 		if err != nil {
-			fmt.Fprintln(env.Stderr, "omac start: hash:", err)
+			fmt.Fprintln(env.Stderr, "omac start: bundle hash:", err)
 			return ExitIOError
 		}
-		if hash != e.MetaHash && !*acceptMetaChanges {
-			fmt.Fprintf(env.Stderr, "omac start: %s: meta_hash drifted since register (pass --accept-meta-changes to continue)\n", e.Name)
+		if bundle != e.BundleHash && !*acceptSkillChanges {
+			fmt.Fprintf(env.Stderr,
+				"omac start: %s: skill bundle changed since register "+
+					"(pass --accept-skill-changes to proceed, or `omac register --force %s` to re-register)\n",
+				e.Name, e.Name)
 			return ExitConfigInvalid
 		}
 		skills = append(skills, resolved{entry: e, meta: m, abs: absDir})
@@ -173,19 +220,41 @@ func runStart(args []string, env *Env) int {
 			allSecrets = append(allSecrets, val)
 		}
 
+		// Resolve config fields with the same precedence as
+		// `omac config show`: stored value > spec.Default >
+		// $spec.DefaultFromEnv > <missing>. A required field is "truly
+		// missing" only when none of those produce a value; that's
+		// the case the user wants us to refuse on. Optional fields are
+		// silently dropped from the env (they get whatever fallback
+		// the sidecar implements internally).
 		cfg := map[string]string{}
+		var missingRequired []string
 		for _, spec := range s.meta.Sidecar.Config {
 			v, ok := configStore.Get(s.entry.Name, spec.Name)
-			if !ok {
-				if spec.IsRequired() {
-					fmt.Fprintf(env.Stderr,
-						"omac start: %s: required config field %s missing. Re-run: omac register --reprompt-fields %s\n",
-						s.entry.Name, spec.Name, s.entry.Name)
-					return ExitSecretRefused
-				}
+			if ok {
+				cfg[spec.Name] = v
 				continue
 			}
-			cfg[spec.Name] = v
+			if spec.Default != "" {
+				cfg[spec.Name] = spec.Default
+				continue
+			}
+			if spec.DefaultFromEnv != "" {
+				if envVal, ok := os.LookupEnv(spec.DefaultFromEnv); ok && envVal != "" {
+					cfg[spec.Name] = envVal
+					continue
+				}
+			}
+			if spec.IsRequired() {
+				missingRequired = append(missingRequired, spec.Name)
+			}
+		}
+		if len(missingRequired) > 0 {
+			fmt.Fprintf(env.Stderr,
+				"omac start: %s: required config field(s) missing: %s\n"+
+					"  Run: omac register --reprompt-fields %s\n",
+				s.entry.Name, strings.Join(missingRequired, ", "), s.entry.Name)
+			return ExitSecretRefused
 		}
 
 		armed = append(armed, withSecrets{resolved: s, secrets: m, config: cfg})
@@ -349,6 +418,101 @@ func runStart(args []string, env *Env) int {
 		return ExitSandboxAbnormal
 	}
 	return code
+}
+
+// autoDeregisterMissing prunes registry entries whose skill directory
+// no longer exists on disk. Returns the names of skills that were
+// pruned, in the order they appeared in the registry. Secrets and
+// skill-config entries are deliberately NOT touched: an accidental
+// `rm -rf` shouldn't lose values.
+//
+// Operates under the registry's flock so concurrent `omac register`
+// calls don't race with us.
+func autoDeregisterMissing(env *Env, reg *registry.Registry) ([]string, error) {
+	if len(reg.Registered) == 0 {
+		return nil, nil
+	}
+	var pruned []string
+	var keep []registry.Entry
+	for _, e := range reg.Registered {
+		absDir := e.SkillDir
+		if !filepath.IsAbs(absDir) {
+			absDir = filepath.Join(env.Workdir, absDir)
+		}
+		// We require both the directory AND its meta.yaml to still
+		// exist; either alone is "broken", but a missing meta.yaml
+		// would have been caught later anyway. Treating both cases as
+		// "skill is gone" is simpler.
+		if _, err := os.Stat(filepath.Join(absDir, "meta.yaml")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				pruned = append(pruned, e.Name)
+				continue
+			}
+			return nil, fmt.Errorf("stat %s: %w", e.Name, err)
+		}
+		keep = append(keep, e)
+	}
+	if len(pruned) == 0 {
+		return nil, nil
+	}
+	if err := registry.WithLock(env.Workdir, func() error {
+		// Re-load under the lock and re-apply the prune. Don't reuse
+		// the in-memory reg (it might be stale relative to a parallel
+		// `omac register`).
+		fresh, err := registry.Load(env.Workdir)
+		if err != nil {
+			return err
+		}
+		for _, name := range pruned {
+			fresh.Remove(name)
+		}
+		return registry.Save(env.Workdir, fresh)
+	}); err != nil {
+		return nil, err
+	}
+	// Update caller's view so subsequent steps don't iterate pruned skills.
+	reg.Registered = keep
+	return pruned, nil
+}
+
+// findUnregisteredSkills returns the names of every directory under
+// <workdir>/.opencode/skills/ that contains a meta.yaml but is NOT
+// in the registry. Names are sorted for deterministic error output.
+//
+// The check is intentionally limited to top-level entries directly
+// under skills/ — nested layouts aren't supported by `omac register`
+// and would cause confusion if surfaced here.
+func findUnregisteredSkills(workdir string, reg *registry.Registry) ([]string, error) {
+	skillsRoot := filepath.Join(workdir, ".opencode", "skills")
+	entries, err := os.ReadDir(skillsRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", skillsRoot, err)
+	}
+	registered := map[string]struct{}{}
+	for _, e := range reg.Registered {
+		registered[e.Name] = struct{}{}
+	}
+	var out []string
+	for _, ent := range entries {
+		if !ent.IsDir() {
+			continue
+		}
+		// A directory only counts as a skill if it carries a meta.yaml.
+		// This excludes incidental subdirectories like "_template/"
+		// that the user might keep alongside real skills.
+		metaPath := filepath.Join(skillsRoot, ent.Name(), "meta.yaml")
+		if _, err := os.Stat(metaPath); err != nil {
+			continue
+		}
+		if _, ok := registered[ent.Name()]; !ok {
+			out = append(out, ent.Name())
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // createRuntimeDir creates ${TMPDIR}/omac-<workdir-hash>/{logs,pids}.

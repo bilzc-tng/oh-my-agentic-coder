@@ -106,7 +106,7 @@ The proposal: a facade that the sandbox reaches via a **bind-mounted Unix socket
 │                                 │                                   │
 │   OMAC_SOCKET=/tmp/omac-.../bridge.sock                             │
 │   OMAC_SKILLS=slack,himalaya,jira                                   │
-│   OMAC_SLACK_BASE=http+unix://%2Ftmp%2F.../bridge.sock/slack/       │
+│   OMAC_SLACK_BASE=http://127.0.0.1:<port>/slack                    │
 │                                                                     │
 │   opencode / claude-code:                                           │
 │     curl --unix-socket "$OMAC_SOCKET" http://x/slack/api/chat…      │
@@ -328,13 +328,13 @@ Per-workdir registry. Authoritative list of which skills' sidecars are active.
     {
       "name": "slack",
       "skill_dir": ".opencode/skills/slack",
-      "meta_hash": "sha256:…",
+      "bundle_hash": "sha256:…",
       "registered_at": "2026-04-22T08:15:00Z"
     },
     {
       "name": "himalaya-email",
       "skill_dir": ".opencode/skills/himalaya-email",
-      "meta_hash": "sha256:…",
+      "bundle_hash": "sha256:…",
       "registered_at": "2026-04-22T08:20:12Z"
     }
   ]
@@ -345,7 +345,12 @@ Write semantics:
 
 - All mutations go through write-to-temp + `rename(2)` (atomic on POSIX).
 - A `flock(2)` on `.opencode/sidecar.json.lock` serializes concurrent `omac` invocations.
-- `meta_hash` pins the metadata that was registered. On `omac start`, if the current `meta.yaml` hash differs, `omac` prints a warning listing changed fields and refuses to start unless `--accept-meta-changes` is passed.
+- `bundle_hash` pins the entire skill source tree at register time
+  (every meaningful file under `.opencode/skills/<name>/`, excluding
+  runtime artifacts like virtualenvs, caches, `node_modules/`, VCS
+  metadata). On `omac start`, if the current bundle hash differs,
+  `omac` refuses to start unless `--accept-skill-changes` is passed
+  (or the user re-registers with `omac register --force <skill>`).
 
 ### 8.2 Skill layout
 
@@ -388,8 +393,8 @@ variables:
 | `OMAC_PORT` | `<port>` | Same. |
 | `OMAC_SOCKET` | Absolute path to `bridge.sock`. | Unix transport (fallback). |
 | `OMAC_SKILLS` | Comma-separated list of active skill mounts. | Introspection. |
-| `OMAC_<SKILL>_BASE` | `http://127.0.0.1:<port>/<mount>/` | **Preferred** per-skill URL (TCP). |
-| `OMAC_<SKILL>_SOCKET_BASE` | `http+unix://<pct-encoded-socket>/<mount>/` | Per-skill Unix URL (fallback). |
+| `OMAC_<SKILL>_BASE` | `http://127.0.0.1:<port>/<mount>` | **Preferred** per-skill URL (TCP), without a trailing slash. |
+| `OMAC_<SKILL>_SOCKET_BASE` | `http+unix://<pct-encoded-socket>/<mount>` | Per-skill Unix URL (fallback), without a trailing slash. |
 | `OMAC_VERSION` | `omac` binary version. | Skill compatibility checks. |
 
 Skill name → env suffix mapping: uppercase, `-` → `_`, non-alphanumerics stripped. `himalaya-email` → `OMAC_HIMALAYA_EMAIL_BASE` and `OMAC_HIMALAYA_EMAIL_SOCKET_BASE`.
@@ -408,7 +413,7 @@ runs and on Linux. Clients should prefer the TCP form.
 
 ```bash
 # Preferred: TCP form, works under nono proxy mode on macOS.
-curl -sS "${OMAC_SLACK_BASE}api/chat.postMessage" -d '...'
+curl -sS "${OMAC_SLACK_BASE}/api/chat.postMessage" -d '...'
 ```
 
 ```bash
@@ -471,7 +476,7 @@ All commands are idempotent unless noted. All accept `--workdir <dir>` (default:
    - The full script contents (with a header like `# ===== BEGIN install.macos.sh =====`).
    - The recommended invocation: `bash <path>`.
    - A reminder to inspect/modify before running.
-6. Appends the skill to `.opencode/sidecar.json` (atomic rename), recording the list of secret **names** (never values) that were populated. If already present with a matching `meta_hash`, is a no-op for metadata. If present with a different hash, prints a diff and updates on `--force`.
+6. Appends the skill to `.opencode/sidecar.json` (atomic rename), recording the list of secret **names** (never values) that were populated. If already present with a matching `bundle_hash`, is a no-op for metadata. If present with a different hash, prints a diff and updates on `--force`.
 
 Exit codes: `0` success, `2` no sidecar block, `3` schema validation failed, `4` skill not installed, `5` registry write failed, `8` keychain access failed, `9` required secret refused by user.
 
@@ -517,7 +522,7 @@ Common flags:
 - `--sandbox <profile>` — select a named sandbox profile from config (`sandbox.profiles.<name>`).
 - `--no-sandbox` — run the inner command directly without a sandbox (dangerous; for debugging only).
 - `--keep-running` — do not stop sidecars when the inner command exits (useful when iterating on sidecar development).
-- `--accept-meta-changes` — tolerate `meta_hash` drift.
+- `--accept-skill-changes` — tolerate `bundle_hash` drift.
 - `--verbose`, `--log-level <level>`.
 
 ### 10.5 `omac doctor`
@@ -558,7 +563,7 @@ user: omac register slack
  ├─ print: install-script path + contents + "run it yourself"
  ├─ acquire .opencode/sidecar.json.lock (flock)
  ├─ read registry → append entry
- │   (name, skill_dir, meta_hash, timestamp, declared_secret_names[])
+ │   (name, skill_dir, bundle_hash, timestamp, declared_secret_names[])
  ├─ write registry.tmp → rename → registry
  └─ release lock
 ```
@@ -574,7 +579,23 @@ user: omac start -- --some --inner-arg
 
 omac:
  1. Load config (§15) and .opencode/sidecar.json.
- 2. For each registered skill, verify meta_hash; stop if drifted and --accept-meta-changes not set.
+ 2. Drift reconciliation (refuses to spawn anything until clean):
+    a. Auto-deregister entries whose skill_dir no longer exists.
+       Silent except for an [info] log + a hint about how to purge
+       leftover secrets/config (`omac deregister --purge-secrets
+       --purge-fields <skill>`). Stored values are KEPT to make
+       accidental `rm -rf` recoverable.
+    b. Refuse if any directory under .opencode/skills/ contains a
+       meta.yaml but is not in the registry; print the exact
+       `omac register <skill>` command for each one.
+    c. For each registered skill, recompute bundle_hash; if it
+       differs from the stored value, refuse unless
+       --accept-skill-changes is set. (`omac register --force <skill>`
+       is the supported way to re-register on intentional changes.)
+    d. For each registered skill, ensure every required `config:`
+       field resolves: stored value > spec default > default_from_env
+       in the host shell. Refuse with the list of missing names if
+       not, suggesting `omac register --reprompt-fields <skill>`.
  3. For each registered skill, read its declared secrets from the OS keychain
     (service = "omac/<skill>", account = <secret.name>).
     - Missing required secrets → abort with exit 9 and a clear prompt:
@@ -978,7 +999,7 @@ One line per request, newline-delimited JSON, to `logs/facade.log`:
 | Stale `bridge.sock` from a previous crash | `connect()` fails on start | `unlink` and recreate. |
 | Orphaned sidecars from a previous crash | `pids/<skill>.pid` file + `kill(0, pid)` check + cmdline match | `omac doctor --fix` kills them. |
 | `sidecar.json` concurrent write | `flock` contention | Retry briefly; fail after 5 s with a clear message. |
-| `meta.yaml` changed since registration | `meta_hash` mismatch | Refuse to start; diff printed; `--accept-meta-changes` opts in. |
+| `meta.yaml` changed since registration | `bundle_hash` mismatch | Refuse to start; diff printed; `--accept-skill-changes` opts in. |
 
 ---
 
@@ -1067,13 +1088,13 @@ sidecar:
     {
       "name": "slack",
       "skill_dir": ".opencode/skills/slack",
-      "meta_hash": "sha256:9f4b3a…",
+      "bundle_hash": "sha256:9f4b3a…",
       "registered_at": "2026-04-22T08:15:00Z"
     },
     {
       "name": "himalaya-email",
       "skill_dir": ".opencode/skills/himalaya-email",
-      "meta_hash": "sha256:1c77e2…",
+      "bundle_hash": "sha256:1c77e2…",
       "registered_at": "2026-04-22T08:20:12Z"
     }
   ]
@@ -1094,10 +1115,10 @@ OMAC_HOST=127.0.0.1
 OMAC_PORT=41017
 OMAC_SOCKET=/tmp/omac-9f4b3a8c2e10/bridge.sock
 OMAC_SKILLS=slack,himalaya-email
-OMAC_SLACK_BASE=http://127.0.0.1:41017/slack/
-OMAC_SLACK_SOCKET_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/slack/
-OMAC_HIMALAYA_EMAIL_BASE=http://127.0.0.1:41017/himalaya-email/
-OMAC_HIMALAYA_EMAIL_SOCKET_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/himalaya-email/
+OMAC_SLACK_BASE=http://127.0.0.1:41017/slack
+OMAC_SLACK_SOCKET_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/slack
+OMAC_HIMALAYA_EMAIL_BASE=http://127.0.0.1:41017/himalaya-email
+OMAC_HIMALAYA_EMAIL_SOCKET_BASE=http+unix://%2Ftmp%2Fomac-9f4b3a8c2e10%2Fbridge.sock/himalaya-email
 OMAC_VERSION=0.1.0
 
 nono run \

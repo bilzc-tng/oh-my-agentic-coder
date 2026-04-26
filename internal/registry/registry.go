@@ -26,10 +26,16 @@ type Registry struct {
 }
 
 // Entry is one registered skill sidecar.
+//
+// BundleHash covers every meaningful file in the skill directory
+// (meta.yaml plus the sidecar source), excluding runtime artifacts
+// and developer caches. See config.BundleHash for the wire format.
+// It supersedes the older meta_hash that only covered meta.yaml,
+// so an install-script edit now invalidates the registration too.
 type Entry struct {
 	Name                string    `json:"name"`
 	SkillDir            string    `json:"skill_dir"`
-	MetaHash            string    `json:"meta_hash"`
+	BundleHash          string    `json:"bundle_hash"`
 	RegisteredAt        time.Time `json:"registered_at"`
 	DeclaredSecretNames []string  `json:"declared_secret_names,omitempty"`
 }

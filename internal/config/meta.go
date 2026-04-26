@@ -7,8 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -323,13 +326,119 @@ func (s *SidecarMeta) InstallScriptFor(o osinfo.OS) string {
 	return s.InstallScripts[string(o)]
 }
 
-// HashMetaFile returns the sha256 hex digest of the meta.yaml file at path.
-// This is used to pin the registered state to specific metadata content.
-func HashMetaFile(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+// BundleHash returns a sha256 digest covering every meaningful file in
+// a skill directory: meta.yaml, the sidecar entry-point, helper
+// modules, install scripts. Runtime artifacts and developer caches
+// (virtualenvs, *.pyc, node_modules, .git, .DS_Store, ...) are
+// excluded so the hash stays stable across `pip install` runs and the
+// like.
+//
+// Wire format (a Merkle-style two-level hash):
+//
+//	for each included file (sorted by repo-relative path):
+//	    digest_input += relative_path + "\x00" + sha256(file_bytes) + "\x00"
+//	bundle_hash = "sha256:" + hex(sha256(digest_input))
+//
+// The NUL byte is a separator that no path or hex digest can contain,
+// so file boundaries are unambiguous. Sorting by relative path makes
+// the result deterministic regardless of filesystem traversal order.
+//
+// Returns an error only if a directory entry can't be stat'd or read;
+// missing dir is reported as a regular fs.PathError.
+func BundleHash(skillDir string) (string, error) {
+	abs, err := filepath.Abs(skillDir)
+	if err != nil {
+		return "", fmt.Errorf("bundle hash: abs: %w", err)
+	}
+	type item struct {
+		rel string
+		sum [sha256.Size]byte
+	}
+	var items []item
+
+	err = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(abs, p)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == "." {
+			return nil
+		}
+		// Normalize separator so a Windows-style backslash never sneaks
+		// into the digest (we don't currently support Windows builds,
+		// but cheap insurance for the day someone tries).
+		rel = filepath.ToSlash(rel)
+
+		if d.IsDir() {
+			if isExcludedDirName(d.Name()) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			// Skip symlinks, sockets, devices. Hashing through symlinks
+			// would let a target replacement silently change the bundle
+			// without tripping detection.
+			return nil
+		}
+		if isExcludedFileName(d.Name()) {
+			return nil
+		}
+		raw, readErr := os.ReadFile(p)
+		if readErr != nil {
+			return fmt.Errorf("bundle hash: read %s: %w", rel, readErr)
+		}
+		items = append(items, item{rel: rel, sum: sha256.Sum256(raw)})
+		return nil
+	})
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(raw)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	sort.Slice(items, func(i, j int) bool { return items[i].rel < items[j].rel })
+
+	h := sha256.New()
+	for _, it := range items {
+		h.Write([]byte(it.rel))
+		h.Write([]byte{0})
+		h.Write(it.sum[:])
+		h.Write([]byte{0})
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// isExcludedDirName reports whether walking should skip a subtree
+// matching a known runtime-artifact / VCS / cache directory name.
+// The check is on the basename only, so a skill that legitimately
+// contains a file called "build" (in some content sense) is still
+// hashed; only directory matches trigger a skip.
+func isExcludedDirName(name string) bool {
+	switch name {
+	case ".git", ".hg", ".svn",
+		".venv", "venv", ".tox", "__pycache__",
+		"node_modules",
+		".cache", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+		"target", "dist", "build",
+		".idea", ".vscode":
+		return true
+	}
+	return false
+}
+
+// isExcludedFileName reports whether a file should be skipped from
+// the hash. Compiled output and OS-level junk only.
+func isExcludedFileName(name string) bool {
+	switch name {
+	case ".DS_Store", "Thumbs.db", ".gitignore.swp":
+		return true
+	}
+	// Suffix-based: Python bytecode, common editor swap files.
+	for _, suffix := range []string{".pyc", ".pyo", ".swp", "~"} {
+		if strings.HasSuffix(name, suffix) && name != suffix {
+			return true
+		}
+	}
+	return false
 }
