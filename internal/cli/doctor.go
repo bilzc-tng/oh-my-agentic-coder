@@ -52,7 +52,7 @@ func runDoctor(args []string, env *Env) int {
 		if !filepath.IsAbs(absDir) {
 			absDir = filepath.Join(env.Workdir, absDir)
 		}
-		metaPath := filepath.Join(absDir, "meta.yaml")
+		metaPath := filepath.Join(absDir, config.MetaFileName)
 		m, err := config.LoadMeta(metaPath)
 		if err != nil {
 			fmt.Fprintf(env.Stdout, "  [fail] %s: %v\n", e.Name, err)

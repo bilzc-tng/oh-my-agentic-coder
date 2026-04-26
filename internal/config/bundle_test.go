@@ -28,7 +28,7 @@ func stageSkill(t *testing.T, dir string, files map[string]string) string {
 
 func TestBundleHash_Stable(t *testing.T) {
 	a := stageSkill(t, t.TempDir(), map[string]string{
-		"meta.yaml":                "name: x\n",
+		"omac.yaml":                "name: x\n",
 		"sidecar.py":               "# server\n",
 		"install/install.macos.sh": "#!/bin/sh\n",
 	})
@@ -50,12 +50,12 @@ func TestBundleHash_Stable(t *testing.T) {
 }
 
 func TestBundleHash_DifferentContentsDiffer(t *testing.T) {
-	a := stageSkill(t, t.TempDir(), map[string]string{"meta.yaml": "name: a\n"})
-	b := stageSkill(t, t.TempDir(), map[string]string{"meta.yaml": "name: b\n"})
+	a := stageSkill(t, t.TempDir(), map[string]string{"omac.yaml": "name: a\n"})
+	b := stageSkill(t, t.TempDir(), map[string]string{"omac.yaml": "name: b\n"})
 	h1, _ := BundleHash(a)
 	h2, _ := BundleHash(b)
 	if h1 == h2 {
-		t.Errorf("different meta.yaml contents must yield different hashes; got %s", h1)
+		t.Errorf("different omac.yaml contents must yield different hashes; got %s", h1)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestBundleHash_FilenameMatters(t *testing.T) {
 // and re-hashes. Both hashes must match.
 func TestBundleHash_ExcludesRuntimeArtifacts(t *testing.T) {
 	dir := stageSkill(t, t.TempDir(), map[string]string{
-		"meta.yaml":  "name: x\n",
+		"omac.yaml":  "name: x\n",
 		"sidecar.py": "# server\n",
 	})
 	baseline, err := BundleHash(dir)
@@ -111,7 +111,7 @@ func TestBundleHash_ExcludesRuntimeArtifacts(t *testing.T) {
 
 func TestBundleHash_IncludesNestedSourceFiles(t *testing.T) {
 	dir := stageSkill(t, t.TempDir(), map[string]string{
-		"meta.yaml":        "name: x\n",
+		"omac.yaml":        "name: x\n",
 		"sidecar.py":       "# server\n",
 		"helpers/util.py":  "def f(): return 1\n",
 		"install/macos.sh": "echo hi\n",
@@ -136,7 +136,7 @@ func TestBundleHash_MissingDir(t *testing.T) {
 
 func TestBundleHash_SkipsSymlinks(t *testing.T) {
 	dir := stageSkill(t, t.TempDir(), map[string]string{
-		"meta.yaml":  "name: x\n",
+		"omac.yaml":  "name: x\n",
 		"sidecar.py": "# server\n",
 	})
 	// Create a symlink that points outside the bundle. Hashing through
@@ -156,7 +156,7 @@ func TestBundleHash_SkipsSymlinks(t *testing.T) {
 	}
 	// Compare against a baseline WITHOUT the symlink.
 	baselineDir := stageSkill(t, t.TempDir(), map[string]string{
-		"meta.yaml":  "name: x\n",
+		"omac.yaml":  "name: x\n",
 		"sidecar.py": "# server\n",
 	})
 	baseline, _ := BundleHash(baselineDir)

@@ -27,7 +27,7 @@ func withFakeHome(t *testing.T) string {
 	return home
 }
 
-// stageSkill drops a meta.yaml under <root>/<name>/ so Discover and
+// stageSkill drops a omac.yaml under <root>/<name>/ so Discover and
 // Resolve count it as a skill. Body is intentionally minimal — we
 // don't load or validate the meta in this package.
 func stageSkill(t *testing.T, root, name string) string {
@@ -36,8 +36,8 @@ func stageSkill(t *testing.T, root, name string) string {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", dir, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "meta.yaml"), []byte("name: "+name+"\n"), 0o644); err != nil {
-		t.Fatalf("write meta.yaml: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, "omac.yaml"), []byte("name: "+name+"\n"), 0o644); err != nil {
+		t.Fatalf("write omac.yaml: %v", err)
 	}
 	return dir
 }
@@ -189,7 +189,7 @@ func TestDiscover_MergesAndDedupes(t *testing.T) {
 func TestDiscover_SkipsDirsWithoutMeta(t *testing.T) {
 	home := withFakeHome(t)
 	wd := t.TempDir()
-	// A bare directory without meta.yaml under skills/ is incidental
+	// A bare directory without omac.yaml under skills/ is incidental
 	// (e.g. _template/). It should NOT show up.
 	if err := os.MkdirAll(filepath.Join(wd, ".opencode", "skills", "_template"), 0o755); err != nil {
 		t.Fatal(err)

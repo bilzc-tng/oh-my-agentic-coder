@@ -13,7 +13,7 @@ package cli
 // Resolution order (mirrors register.go and start.go):
 //
 //   1. Value persisted in <workdir>/.opencode/skill-config.yaml.
-//   2. Else `default:` from meta.yaml.
+//   2. Else `default:` from omac.yaml.
 //   3. Else, for ConfigSpec, `default_from_env: <VAR>` if the var is
 //      set in the SHELL THAT IS RUNNING `omac config` (NOT the same
 //      shell that registered the skill — surface this distinction in
@@ -182,7 +182,7 @@ func buildSkillView(env *Env, skill string) (*skillView, int) {
 	if meta.Sidecar == nil {
 		// Should never happen: register rejects metas without sidecar
 		// blocks. Fail loudly so the inconsistency is visible.
-		fmt.Fprintf(env.Stderr, "omac config: skill %q has no sidecar block in meta.yaml\n", skill)
+		fmt.Fprintf(env.Stderr, "omac config: skill %q has no sidecar block in %s\n", skill, config.MetaFileName)
 		return nil, ExitConfigInvalid
 	}
 

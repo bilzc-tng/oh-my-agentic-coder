@@ -4,7 +4,7 @@ package cli
 //   - autoDeregisterMissing: prunes registry entries whose skill dir
 //     no longer exists, leaves the rest alone.
 //   - findUnregisteredSkills: finds top-level dirs under
-//     .opencode/skills/ that contain a meta.yaml but aren't registered.
+//     .opencode/skills/ that contain a omac.yaml but aren't registered.
 
 import (
 	"os"
@@ -28,7 +28,7 @@ func isolateHome(t *testing.T) {
 
 // stageWorkdir creates a workdir layout suitable for the drift
 // helpers: .opencode/ exists, with optional skill directories under
-// .opencode/skills/<name>/ each containing a meta.yaml.
+// .opencode/skills/<name>/ each containing a omac.yaml.
 func stageWorkdir(t *testing.T, skills ...string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -37,8 +37,8 @@ func stageWorkdir(t *testing.T, skills ...string) string {
 		if err := os.MkdirAll(skillDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll %s: %v", skillDir, err)
 		}
-		if err := os.WriteFile(filepath.Join(skillDir, "meta.yaml"), []byte("name: "+name+"\n"), 0o644); err != nil {
-			t.Fatalf("write meta.yaml: %v", err)
+		if err := os.WriteFile(filepath.Join(skillDir, "omac.yaml"), []byte("name: "+name+"\n"), 0o644); err != nil {
+			t.Fatalf("write omac.yaml: %v", err)
 		}
 	}
 	return dir
@@ -152,7 +152,7 @@ func TestFindUnregisteredSkills_AllRegistered(t *testing.T) {
 func TestFindUnregisteredSkills_SkipsDirsWithoutMetaYaml(t *testing.T) {
 	isolateHome(t)
 	dir := stageWorkdir(t, "alpha")
-	// Stage a directory under skills/ but without a meta.yaml. It's
+	// Stage a directory under skills/ but without a omac.yaml. It's
 	// an incidental subdirectory (e.g. _template/), not a real skill,
 	// so the helper must NOT flag it as unregistered.
 	if err := os.MkdirAll(filepath.Join(dir, ".opencode", "skills", "_template"), 0o755); err != nil {
@@ -164,7 +164,7 @@ func TestFindUnregisteredSkills_SkipsDirsWithoutMetaYaml(t *testing.T) {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
 	if len(got) != 0 {
-		t.Errorf("findUnregisteredSkills = %v, want [] (template dir lacks meta.yaml)", got)
+		t.Errorf("findUnregisteredSkills = %v, want [] (template dir lacks omac.yaml)", got)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestFindUnregisteredSkills_SeesUserGlobal(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(globalRoot, "bravo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(globalRoot, "bravo", "meta.yaml"), []byte("name: bravo\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(globalRoot, "bravo", "omac.yaml"), []byte("name: bravo\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,7 +228,7 @@ func TestFindUnregisteredSkills_WorkdirHidesUserGlobalDup(t *testing.T) {
 	if err := os.MkdirAll(globalRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(globalRoot, "meta.yaml"), []byte("name: shared\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(globalRoot, "omac.yaml"), []byte("name: shared\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -71,7 +71,7 @@ func runList(_ []string, env *Env) int {
 		if !filepath.IsAbs(absDir) {
 			absDir = filepath.Join(env.Workdir, absDir)
 		}
-		metaPath := filepath.Join(absDir, "meta.yaml")
+		metaPath := filepath.Join(absDir, config.MetaFileName)
 		if m, err := config.LoadMeta(metaPath); err == nil && m.Sidecar != nil {
 			mount = m.Sidecar.MountOrDefault(e.Name)
 			if candidate := skillArtifactCandidate(m.Sidecar.Command); candidate != "" {

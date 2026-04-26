@@ -62,7 +62,7 @@ func runRegister(args []string, env *Env) int {
 		}
 		return ExitConfigInvalid
 	}
-	metaPath := filepath.Join(skillDir, "meta.yaml")
+	metaPath := filepath.Join(skillDir, config.MetaFileName)
 	if src.Kind != "workdir" {
 		fmt.Fprintf(env.Stdout, "[info] using user-global skill source: %s\n", skillDir)
 	}
@@ -197,14 +197,14 @@ func runRegister(args []string, env *Env) int {
 					"         bash %s\n",
 				host, scriptAbs, scriptAbs)
 		} else if errors.Is(statErr, os.ErrNotExist) {
-			// meta.yaml declares an install script but the file isn't on
-			// disk. Surface this as a hint instead of a hard error
+			// omac.yaml declares an install script but the file isn't
+			// on disk. Surface this as a hint instead of a hard error
 			// because the meta has already been validated and lots of
 			// skills reference an install_scripts: entry without
 			// shipping every OS variant.
 			fmt.Fprintf(env.Stderr,
-				"[warn] install script for %s declared in meta.yaml but missing on disk: %s\n",
-				host, scriptAbs)
+				"[warn] install script for %s declared in %s but missing on disk: %s\n",
+				host, config.MetaFileName, scriptAbs)
 		} else {
 			fmt.Fprintln(env.Stderr, "omac register: stat install script:", statErr)
 			return ExitIOError

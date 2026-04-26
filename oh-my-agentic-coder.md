@@ -45,7 +45,7 @@ The proposal: a facade that the sandbox reaches via a **bind-mounted Unix socket
 
 - **No TCP surface** from sandbox to host for skill traffic. Only a Unix socket file.
 - **Secrets stay outside.** Sidecars run in the host user's context with their own env; the sandbox only sees the socket.
-- **Marketplace-driven.** Skills declare their sidecar in `meta.yaml`; the existing marketplace / skill-installer workflow is enough to distribute them.
+- **Marketplace-driven.** Skills declare their sidecar in `omac.yaml`; the existing marketplace / skill-installer workflow is enough to distribute them.
 - **Explicit installs.** No skill may execute arbitrary install commands during `register`; users inspect and run install scripts themselves.
 - **Runtime-agnostic.** Nono is just one sandbox profile. The launcher is templated argv.
 - **Streaming-first.** Supports plain HTTP, chunked transfer, Server-Sent Events, and WebSocket upgrades end-to-end.
@@ -172,9 +172,17 @@ Rust is chosen because:
 
 ## 7. Skill metadata extensions
 
-### 7.1 New `meta.yaml` fields
+### 7.1 omac.yaml: a separate file from the marketplace's meta.yaml
 
-Existing `meta.yaml` (see `skill-installer/meta.yaml`) has `name, type, version, description, author, dependencies`. We add an optional `sidecar` block:
+omac reads its per-skill metadata from `omac.yaml`, NOT `meta.yaml`.
+The original design extended the marketplace's `meta.yaml`, but the
+two pipelines (publishing vs. omac) ended up wanting different
+schemas in the same file, so they're now decoupled. A skill that
+wants to be both publishable and omac-managed ships both files.
+
+The omac.yaml has the same top-level surface as the marketplace
+`meta.yaml` (`name, type, version, description, author, dependencies`)
+plus an optional `sidecar` block:
 
 ```yaml
 name: slack
@@ -475,7 +483,7 @@ All commands are idempotent unless noted. All accept `--workdir <dir>` (default:
 
 1. Resolves `<skill>` against the layered source list (§8.2):
    workdir-local first, then `$XDG_CONFIG_HOME/opencode/skills/`,
-   then `~/.opencode/skills/`. Loads `meta.yaml` from the first
+   then `~/.opencode/skills/`. Loads `omac.yaml` from the first
    layer that contains it.
 2. Validates the `sidecar` block against the JSON-Schema. If the skill has no sidecar block, exits with code `2` and a clear message.
 3. **Secret prompting** (new, see §16 for the keychain details):
@@ -496,7 +504,7 @@ All commands are idempotent unless noted. All accept `--workdir <dir>` (default:
    - Prints the recommended invocation: `bash <path>`.
    - Prints a reminder that omac will not run it.
    The script body itself is NOT dumped to the terminal; users inspect
-   the file and run it themselves. If `meta.yaml` declares an install
+   the file and run it themselves. If `omac.yaml` declares an install
    script for this OS but the file is missing on disk, a `[warn]` is
    emitted but registration proceeds.
 6. Appends the skill to `.opencode/sidecar.json` (atomic rename), recording the list of secret **names** (never values) that were populated. If already present with a matching `bundle_hash`, is a no-op for metadata. If present with a different hash, prints a diff and updates on `--force`.
@@ -576,7 +584,7 @@ Runs sanity checks:
 
 ```
 user: omac register slack
- ├─ read .opencode/skills/slack/meta.yaml
+ ├─ read .opencode/skills/slack/omac.yaml
  ├─ validate sidecar block
  ├─ for each declared secret:
  │    ├─ already in keychain?     → skip (unless --reprompt-secrets)
@@ -610,7 +618,7 @@ omac:
        accidental `rm -rf` recoverable.
     b. Refuse if any directory in EITHER source layer (workdir-local
        .opencode/skills/ or user-global ~/.config/opencode/skills/)
-       contains a meta.yaml but is not in the registry; print the
+       contains a omac.yaml but is not in the registry; print the
        exact `omac register <skill>` command for each one. Workdir
        and user-global names with the same value are deduplicated
        (workdir wins).
@@ -827,7 +835,7 @@ Each skill that ships a sidecar also ships install scripts under an `install/` d
 
 ```
 .opencode/skills/slack/
-├── meta.yaml
+├── omac.yaml
 ├── SKILL.md
 ├── bin/                      # produced by install script
 ├── src/
@@ -864,7 +872,7 @@ This mirrors the existing "we tell you the commands, you run them" flavour of th
 Skills that talk to external services (Slack, Jira, Gmail, Gitlab, …) need credentials. Those credentials must:
 
 - not live in the sandbox,
-- not live in `meta.yaml` or any file under `.opencode/`,
+- not live in `omac.yaml` or any file under `.opencode/`,
 - not be passed on the command line (visible in `ps`),
 - not be printed to any log,
 - be collectable at registration time and retrievable at start time,
@@ -872,7 +880,7 @@ Skills that talk to external services (Slack, Jira, Gmail, Gitlab, …) need cre
 
 The right storage for that is the OS keychain.
 
-### 16.1 Declaration in `meta.yaml`
+### 16.1 Declaration in `omac.yaml`
 
 Each sidecar declares its secrets in `sidecar.secrets`:
 
@@ -1025,7 +1033,7 @@ One line per request, newline-delimited JSON, to `logs/facade.log`:
 | Stale `bridge.sock` from a previous crash | `connect()` fails on start | `unlink` and recreate. |
 | Orphaned sidecars from a previous crash | `pids/<skill>.pid` file + `kill(0, pid)` check + cmdline match | `omac doctor --fix` kills them. |
 | `sidecar.json` concurrent write | `flock` contention | Retry briefly; fail after 5 s with a clear message. |
-| `meta.yaml` changed since registration | `bundle_hash` mismatch | Refuse to start; diff printed; `--accept-skill-changes` opts in. |
+| `omac.yaml` changed since registration | `bundle_hash` mismatch | Refuse to start; diff printed; `--accept-skill-changes` opts in. |
 
 ---
 
@@ -1037,7 +1045,7 @@ Today: user runs `uv run .opencode/skills/himalaya-email/scripts/gpg-service.py`
 
 Migration:
 
-1. Add a `sidecar` block to `meta.yaml` (§7.3), including any secrets the GPG service needs (e.g. IMAP/SMTP passwords) as `sidecar.secrets`.
+1. Add a `sidecar` block to `omac.yaml` (§7.3), including any secrets the GPG service needs (e.g. IMAP/SMTP passwords) as `sidecar.secrets`.
 2. Update `SKILL.md` to read `OMAC_HIMALAYA_EMAIL_BASE` instead of the hard-coded URL, with a fallback to the old URL so users who haven't adopted `omac` are not broken.
 3. Users run `omac register himalaya-email` once (enter any prompted credentials → stored in keychain), run the install script, then `omac start`.
 
@@ -1056,7 +1064,7 @@ Continue to work unchanged. `omac` ignores them in `register` (exit 2) and does 
 - **Peer-credential auth on the socket** (via `SO_PEERCRED` / `LOCAL_PEERCRED`) to bind routes to a single known pid/uid.
 - **Multi-workdir shared sidecar** (e.g. one Slack sidecar serving several sandboxes). Would require sidecar-side multi-tenancy and shifts the trust model.
 - **Named-pipe support on native Windows** (non-WSL). Likely a new transport module; the rest of the design is unchanged.
-- **Signed skill metadata** — marketplace emits a signature over `meta.yaml` and install scripts; `omac register` verifies before printing.
+- **Signed skill metadata** — marketplace emits a signature over `meta.yaml` (and, if shipped, `omac.yaml`) plus install scripts; `omac register` verifies before printing.
 - **Per-skill egress policy** — sidecars themselves could run under a secondary Nono profile to constrain what they reach outbound.
 - **Access-log redaction** (`sidecar.log_redact` glob list of header names and query parameters).
 - **Per-skill resource quotas** (cpu, mem, max concurrent requests) via cgroups on Linux.
@@ -1066,7 +1074,7 @@ Continue to work unchanged. `omac` ignores them in `register` (exit 2) and does 
 
 ---
 
-## Appendix A — Complete `meta.yaml` example (slack)
+## Appendix A — Complete `omac.yaml` example (slack)
 
 ```yaml
 name: slack

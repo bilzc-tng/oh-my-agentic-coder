@@ -1,5 +1,5 @@
 // Package config defines the on-disk configuration formats used by omac:
-// skill meta.yaml (with the sidecar block), the per-workdir sidecar.json
+// skill omac.yaml (with the sidecar block), the per-workdir sidecar.json
 // registry, and the oh-my-agentic-coder.yaml launcher config.
 package config
 
@@ -20,7 +20,18 @@ import (
 	"github.com/tngtech/oh-my-agentic-coder/internal/osinfo"
 )
 
-// Meta is the skill metadata as stored in meta.yaml. Only the fields
+// MetaFileName is the on-disk filename of the per-skill metadata
+// document omac reads at register/start time. Originally this was
+// "meta.yaml", but that filename collides with the marketplace publishing
+// pipeline's own meta.yaml file; renamed to "omac.yaml" to keep the
+// two concerns separable. A skill that wants to be both omac-managed
+// AND publishable via the marketplace should ship BOTH files.
+//
+// Always read this constant rather than the literal so a future rename
+// stays a one-line change.
+const MetaFileName = "omac.yaml"
+
+// Meta is the skill metadata as stored in omac.yaml. Only the fields
 // omac cares about are declared; unknown keys are ignored.
 type Meta struct {
 	Name         string   `yaml:"name"`
@@ -33,7 +44,7 @@ type Meta struct {
 	Sidecar *SidecarMeta `yaml:"sidecar,omitempty"`
 }
 
-// SidecarMeta is the optional sidecar block in meta.yaml. See
+// SidecarMeta is the optional sidecar block in omac.yaml. See
 // oh-my-agentic-coder.md §7 for the full schema.
 type SidecarMeta struct {
 	Command        []string          `yaml:"command"`
@@ -146,7 +157,7 @@ var (
 	mountRE   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 )
 
-// LoadMeta reads meta.yaml from path and validates it.
+// LoadMeta reads omac.yaml from path and validates it.
 func LoadMeta(path string) (*Meta, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -165,7 +176,7 @@ func LoadMeta(path string) (*Meta, error) {
 // Validate checks the invariants of a Meta value (including the sidecar block).
 func (m *Meta) Validate() error {
 	if m.Name == "" {
-		return fmt.Errorf("meta.yaml: name is required")
+		return fmt.Errorf("%s: name is required", MetaFileName)
 	}
 	if m.Sidecar != nil {
 		if err := m.Sidecar.Validate(m.Name); err != nil {
@@ -327,7 +338,7 @@ func (s *SidecarMeta) InstallScriptFor(o osinfo.OS) string {
 }
 
 // BundleHash returns a sha256 digest covering every meaningful file in
-// a skill directory: meta.yaml, the sidecar entry-point, helper
+// a skill directory: omac.yaml, the sidecar entry-point, helper
 // modules, install scripts. Runtime artifacts and developer caches
 // (virtualenvs, *.pyc, node_modules, .git, .DS_Store, ...) are
 // excluded so the hash stays stable across `pip install` runs and the

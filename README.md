@@ -84,7 +84,7 @@ go install github.com/tngtech/oh-my-agentic-coder/cmd/omac@latest
 cmd/omac/                  Entrypoint.
 internal/cli/              Subcommand dispatch (register/deregister/list/
                            secrets/start/doctor/version).
-internal/config/           meta.yaml + oh-my-agentic-coder.yaml types.
+internal/config/           omac.yaml + oh-my-agentic-coder.yaml types.
 internal/registry/         .opencode/sidecar.json (atomic writes, flock).
 internal/keychain/         Thin wrapper over github.com/zalando/go-keyring.
 internal/secrets/          Secret type (redacted Stringer, zeroize) + masked prompt.
@@ -113,7 +113,7 @@ The facade test skips automatically in environments where Unix-socket
 
 ```bash
 # 1. Install a skill with the existing marketplace installer.
-#    (Skill must declare a `sidecar:` block in its meta.yaml — see the design doc §7.)
+#    (Skill must declare a `sidecar:` block in its omac.yaml — see the design doc §7.)
 scripts/install.sh slack
 
 # 2. Register its sidecar in this workdir. Prompts for every declared secret
@@ -210,7 +210,7 @@ Minimal by design:
 - `github.com/zalando/go-keyring` — macOS Keychain / Secret Service / Windows
   Credential Manager abstraction.
 - `golang.org/x/term` — masked-input password prompt.
-- `gopkg.in/yaml.v3` — `meta.yaml` parsing.
+- `gopkg.in/yaml.v3` — `omac.yaml` parsing.
 
 Everything else is stdlib.
 
@@ -219,7 +219,7 @@ Everything else is stdlib.
 If you want to build a new skill from scratch — or just get a deeper
 walkthrough of the schema, the sidecar contract, and the dev loop — see
 [`CREATING_A_SKILL.md`](./CREATING_A_SKILL.md). It covers the on-disk
-layout, the full `meta.yaml` schema, every env var omac sets in the
+layout, the full `omac.yaml` schema, every env var omac sets in the
 sidecar and inside the sandbox, secrets best practices, and a
 pre-shipping checklist.
 
@@ -230,7 +230,7 @@ the reference for how to write a sidecar-backed skill:
 
 ```
 .opencode/skills/echo-rest/
-├── meta.yaml                    sidecar block + declared secrets + health
+├── omac.yaml                    sidecar block + declared secrets + health
 ├── sidecar.py                   stdlib-only Python HTTP server
 └── install/
     ├── install.macos.sh

@@ -31,7 +31,7 @@ const SchemaVersion = 1
 // Store is the root object of skill-config.yaml. The map is keyed by
 // skill name; each value is keyed by field name and stores the
 // canonical string form of the field's value (the type is recovered
-// from meta.yaml at start time).
+// from omac.yaml at start time).
 type Store struct {
 	Version int                          `yaml:"version"`
 	Skills  map[string]map[string]string `yaml:"skills"`

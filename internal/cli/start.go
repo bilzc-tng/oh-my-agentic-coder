@@ -115,7 +115,7 @@ func runStart(args []string, env *Env) int {
 	}
 
 	// 2b. Refuse if any unregistered skill exists under .opencode/skills/.
-	//     "Skill" here means a directory with a meta.yaml. The user
+	//     "Skill" here means a directory with a omac.yaml. The user
 	//     must explicitly register each one (so registration prompts,
 	//     keychain seeding, etc. don't get silently skipped).
 	unregistered, err := findUnregisteredSkills(env.Workdir, reg)
@@ -197,7 +197,7 @@ func runStart(args []string, env *Env) int {
 		if !filepath.IsAbs(absDir) {
 			absDir = filepath.Join(env.Workdir, absDir)
 		}
-		metaPath := filepath.Join(absDir, "meta.yaml")
+		metaPath := filepath.Join(absDir, config.MetaFileName)
 		m, err := config.LoadMeta(metaPath)
 		if err != nil {
 			metaProblems = append(metaProblems, metaProblem{skill: e.Name, msg: err.Error()})
@@ -291,7 +291,7 @@ func runStart(args []string, env *Env) int {
 		fmt.Fprintf(env.Stderr, "omac start: refusing to start, found %d problem(s):\n", total)
 
 		if len(metaProblems) > 0 {
-			fmt.Fprintln(env.Stderr, "\n  meta.yaml broken:")
+			fmt.Fprintln(env.Stderr, "\n  "+config.MetaFileName+" broken:")
 			for _, p := range metaProblems {
 				fmt.Fprintf(env.Stderr, "    %s — %s\n", p.skill, p.msg)
 			}
@@ -508,11 +508,11 @@ func autoDeregisterMissing(env *Env, reg *registry.Registry) ([]string, error) {
 		if !filepath.IsAbs(absDir) {
 			absDir = filepath.Join(env.Workdir, absDir)
 		}
-		// We require both the directory AND its meta.yaml to still
-		// exist; either alone is "broken", but a missing meta.yaml
+		// We require both the directory AND its omac.yaml to still
+		// exist; either alone is "broken", but a missing omac.yaml
 		// would have been caught later anyway. Treating both cases as
 		// "skill is gone" is simpler.
-		if _, err := os.Stat(filepath.Join(absDir, "meta.yaml")); err != nil {
+		if _, err := os.Stat(filepath.Join(absDir, config.MetaFileName)); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				pruned = append(pruned, e.Name)
 				continue
@@ -547,7 +547,7 @@ func autoDeregisterMissing(env *Env, reg *registry.Registry) ([]string, error) {
 // findUnregisteredSkills returns the names of every skill discovered
 // across BOTH the workdir-local layer (<workdir>/.opencode/skills) and
 // the user-global layer ($XDG_CONFIG_HOME/opencode/skills, with
-// ~/.opencode/skills as a legacy fallback) that has a meta.yaml but
+// ~/.opencode/skills as a legacy fallback) that has a omac.yaml but
 // is NOT in the registry. Names are sorted for deterministic output.
 //
 // Workdir-local skills win over user-global skills when both layers

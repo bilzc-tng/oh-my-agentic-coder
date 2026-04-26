@@ -13,6 +13,13 @@ If you have not already, read:
 - [`.opencode/skills/echo-rest/`](./.opencode/skills/echo-rest/) — the
   reference skill. Copy it as a starting point.
 
+> **Heads-up if you read an older version of this guide:** omac's
+> per-skill metadata file is now `omac.yaml`, not `meta.yaml`. The old
+> name collided with the marketplace publishing pipeline's own
+> `meta.yaml`. A skill that wants to be both publishable and have an
+> omac sidecar should ship both files. See §7.1 of the design doc for
+> rationale.
+
 ---
 
 ## 1. Why a sidecar?
@@ -43,7 +50,7 @@ it only gets a socket path.
 
 ## 2. Skill on-disk layout
 
-A skill is a directory containing a `meta.yaml`. omac looks in two
+A skill is a directory containing an `omac.yaml`. omac looks in two
 locations, in this order:
 
 1. **Workdir-local** — `<workdir>/.opencode/skills/<name>/`. The
@@ -65,7 +72,7 @@ Inside either location the per-skill layout is the same:
 
 ```
 <location>/skills/<name>/
-├── meta.yaml                 required — schema below
+├── omac.yaml                 required — schema below
 ├── <your sidecar>            any executable: python, node, go binary, bash, …
 └── install/
     ├── install.macos.sh      optional but recommended
@@ -80,7 +87,7 @@ Naming rules:
 
 ---
 
-## 3. `meta.yaml` schema
+## 3. `omac.yaml` schema
 
 Minimal example (based on `echo-rest`):
 
@@ -294,7 +301,7 @@ mount string by uppercasing letters and replacing every non-alphanumeric
 character with `_`. Examples (pinned in
 `internal/sandbox/launcher_test.go`):
 
-| `mount:` in meta.yaml | Env var name |
+| `mount:` in omac.yaml | Env var name |
 | --- | --- |
 | `echo` | `OMAC_ECHO_BASE` |
 | `himalaya-email` | `OMAC_HIMALAYA_EMAIL_BASE` |
@@ -312,7 +319,7 @@ inside the sandbox, **use the TCP form first**.
 ### 7.1 Validate the metadata
 
 ```bash
-omac register --no-secrets my-skill   # validates meta.yaml + adds to registry
+omac register --no-secrets my-skill   # validates omac.yaml + adds to registry
 omac doctor                           # runs sanity checks
 omac list                             # shows mount, secret count, binary status
 omac config show my-skill             # inspect resolved config + secret fingerprints
@@ -363,7 +370,7 @@ checked:
    config are insurance against an accidental `rm -rf` on the skills
    tree.
 
-2. **Unregistered skill on disk** (a directory with `meta.yaml` under
+2. **Unregistered skill on disk** (a directory with an `omac.yaml` under
    *either* skill source — the workdir-local layer or the user-global
    layer, see §2 — that omac has never seen). Refuses to start;
    prints the exact register command for each one. Re-registration is
@@ -371,7 +378,7 @@ checked:
    config-prompting happen.
 
 3. **Bundle hash drift** (the registered skill's source files changed
-   since register). The bundle hash covers `meta.yaml` and every
+   since register). The bundle hash covers `omac.yaml` and every
    sidecar source file (helper modules, install scripts) — but
    excludes runtime artifacts like `__pycache__/`, `.venv/`,
    `node_modules/`, `.git/`, `.DS_Store`, `*.pyc`, editor swap files,
@@ -444,7 +451,7 @@ Skills often have *operational* configuration that isn't a credential
 but still varies between users or deployments: an API base URL, a
 default region, a feature flag, a retry limit. Putting these in the
 keychain is overkill (and obscures them); hard-coding them in
-`meta.yaml` makes the skill un-reusable. Declare them under
+`omac.yaml` makes the skill un-reusable. Declare them under
 `sidecar.config:` instead.
 
 The lifecycle:
@@ -636,7 +643,7 @@ omac start
 
 ## 11. Checklist before shipping
 
-- [ ] `meta.yaml` validates (`omac register --no-secrets …` succeeds).
+- [ ] `omac.yaml` validates (`omac register --no-secrets …` succeeds).
 - [ ] `mount` matches `^[a-z0-9][a-z0-9-]*$`.
 - [ ] Sidecar binds on `127.0.0.1:$SIDECAR_PORT` (not `0.0.0.0`).
 - [ ] `GET /status` returns 2xx within `health.timeout_ms`.
@@ -654,7 +661,7 @@ omac start
 ## References inside this repo
 
 - Reference skill: [`.opencode/skills/echo-rest/`](./.opencode/skills/echo-rest/)
-- `meta.yaml` schema: [`internal/config/meta.go`](./internal/config/meta.go)
+- `omac.yaml` schema: [`internal/config/meta.go`](./internal/config/meta.go)
 - Sidecar lifecycle (env injection, port assignment): [`internal/supervisor/supervisor.go`](./internal/supervisor/supervisor.go)
 - Facade routing & SSE: [`internal/facade/facade.go`](./internal/facade/facade.go)
 - Sandbox launcher (`OMAC_*_BASE` env splat): [`internal/sandbox/launcher.go`](./internal/sandbox/launcher.go)

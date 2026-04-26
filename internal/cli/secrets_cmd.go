@@ -180,7 +180,7 @@ func loadRegisteredMeta(env *Env, skill string) (*config.Meta, error) {
 	if !filepath.IsAbs(absDir) {
 		absDir = filepath.Join(env.Workdir, absDir)
 	}
-	return config.LoadMeta(filepath.Join(absDir, "meta.yaml"))
+	return config.LoadMeta(filepath.Join(absDir, config.MetaFileName))
 }
 
 func findSecret(m *config.Meta, name string) (config.SecretSpec, bool) {

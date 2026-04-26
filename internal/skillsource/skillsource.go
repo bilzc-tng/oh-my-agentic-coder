@@ -30,6 +30,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 )
 
 // Source describes one location omac looks in for skill source dirs.
@@ -116,7 +118,7 @@ func dedupe(in []string) []string {
 func Resolve(workdir, name string) (absDir string, src Source, err error) {
 	for _, s := range Sources(workdir) {
 		candidate := filepath.Join(s.Root, name)
-		metaPath := filepath.Join(candidate, "meta.yaml")
+		metaPath := filepath.Join(candidate, config.MetaFileName)
 		if _, err := os.Stat(metaPath); err == nil {
 			return candidate, s, nil
 		} else if !errors.Is(err, os.ErrNotExist) {
@@ -139,7 +141,7 @@ type Entry struct {
 
 // Discover returns every skill found across every source, with
 // duplicates resolved by precedence (workdir wins). A directory is
-// considered a skill if and only if it contains a meta.yaml at its
+// considered a skill if and only if it contains a omac.yaml at its
 // top level. Returns the entries unsorted; callers that want
 // deterministic output should sort by Name.
 //
@@ -163,7 +165,7 @@ func Discover(workdir string) ([]Entry, error) {
 			if _, dup := seen[ent.Name()]; dup {
 				continue
 			}
-			metaPath := filepath.Join(s.Root, ent.Name(), "meta.yaml")
+			metaPath := filepath.Join(s.Root, ent.Name(), config.MetaFileName)
 			if _, err := os.Stat(metaPath); err != nil {
 				continue
 			}
