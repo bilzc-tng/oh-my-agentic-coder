@@ -70,8 +70,10 @@ if [ -d "$GSRC" ]; then
   GDST="$XDG_CONFIG_HOME/opencode/skills/echo-rest"
   mkdir -p "$(dirname "$GDST")"
   cp -R "$GSRC" "$GDST"
-  # Register it globally (echo-rest's secrets/config all have defaults).
-  "$OMAC" --workdir "$ROOT/projA" register echo-rest --no-secrets >/dev/null 2>&1 || true
+  # Register it globally, fully non-interactively: --no-secrets skips the
+  # secret prompt, --no-fields skips the config-field prompts (echo-rest's
+  # fields all have defaults), and </dev/null guarantees no blocking read.
+  "$OMAC" --workdir "$ROOT/projA" register echo-rest --no-secrets --no-fields </dev/null >/dev/null 2>&1 || true
   ok "staged global echo-rest skill"
 else
   echo "  [warn] echo-rest skill not found; skipping global/round-trip tiers"
