@@ -75,8 +75,16 @@ function globalEnvName(mount: string): string {
   return `OMAC_G_${envIdent(mount)}_BASE`
 }
 
-export const OmacMultiDirPlugin: Plugin = async ({ client }) => {
+export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }) => {
   const controlBase = process.env.OMAC_CONTROL_BASE?.replace(/\/+$/, "")
+
+  // OpenCode instantiates this plugin once per project directory it
+  // bootstraps (not once per session), and binds `directory` to that
+  // project root. That — not a session event — is the reliable activation
+  // trigger: many flows (reopening an existing session, headless API use)
+  // never emit session.created. So we activate `directory` immediately at
+  // construction. `pluginDir` is this instance's bound directory.
+  const pluginDir = directory || worktree || ""
 
   // sessionID -> absolute directory, learned from session lifecycle events.
   const sessionDir = new Map<string, string>()
@@ -179,6 +187,14 @@ export const OmacMultiDirPlugin: Plugin = async ({ client }) => {
       }
     }
     return lines.join("\n")
+  }
+
+  // Eagerly activate this instance's bound project directory. This is the
+  // primary trigger (the session-event handler below is a best-effort
+  // supplement for directories learned from session payloads). A dir
+  // outside the server's --root is refused by omac and logged, not fatal.
+  if (enabled() && pluginDir) {
+    await activate(pluginDir)
   }
 
   return {
