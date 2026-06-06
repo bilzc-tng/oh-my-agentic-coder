@@ -502,6 +502,30 @@ func (s *serveServer) activateGlobals() error {
 	return nil
 }
 
+// reloadGlobals tears down every currently-mounted global skill (routes +
+// sidecars) and re-runs activateGlobals, so a newly registered/deregistered
+// global skill is picked up without restarting serve. This is the global
+// counterpart to deactivate+activate for a directory.
+func (s *serveServer) reloadGlobals() error {
+	// Snapshot and clear the current global set under the lock.
+	s.mu.Lock()
+	old := s.global
+	s.global = map[string]*skillRoute{}
+	s.mu.Unlock()
+
+	// Tear down old routes + sidecars (outside the lock; StopSidecar and
+	// RemoveRoute take their own locks).
+	for mount, sr := range old {
+		s.facade.RemoveRoute(facade.GlobalNamespace, mount)
+		if sr.State == facade.RouteReady {
+			s.sup.StopSidecar(facade.GlobalNamespace+"/"+sr.Name, 5*time.Second)
+		}
+	}
+
+	// Re-activate from the (now-current) global registry.
+	return s.activateGlobals()
+}
+
 // ---- lazy activation ----
 
 // activate brings a directory online (idempotent) and returns its manifest.
@@ -969,9 +993,25 @@ func (s *serveServer) controlMux() *http.ServeMux {
 	mux.HandleFunc("/__omac__/activate", s.handleActivate)
 	mux.HandleFunc("/__omac__/deactivate", s.handleDeactivate)
 	mux.HandleFunc("/__omac__/reload", s.handleReload)
+	mux.HandleFunc("/__omac__/reload-global", s.handleReloadGlobal)
 	mux.HandleFunc("/__omac__/dirs", s.handleDirs)
 	mux.HandleFunc("/__omac__/global", s.handleGlobal)
 	return mux
+}
+
+// handleReloadGlobal re-activates the user-global skill layer (POST). Used
+// after a global `omac register`/`deregister` so the change takes effect
+// without restarting serve. Returns the refreshed global skill list.
+func (s *serveServer) handleReloadGlobal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	if err := s.reloadGlobals(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.handleGlobal(w, r) // respond with the refreshed global list
 }
 
 type dirReq struct {

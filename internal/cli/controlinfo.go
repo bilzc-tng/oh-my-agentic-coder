@@ -112,3 +112,27 @@ func notifyReload(absDir string) (bool, string) {
 	}
 	return false, fmt.Sprintf("omac serve reload returned %d", resp.StatusCode)
 }
+
+// notifyReloadGlobal best-effort asks a running `omac serve` to re-activate
+// its user-global skill layer, so a global skill just registered/deregistered
+// is picked up without restarting serve. Same contract as notifyReload.
+func notifyReloadGlobal() (bool, string) {
+	ci, ok := readControlInfo()
+	if !ok {
+		return false, "no running omac serve detected"
+	}
+	req, err := http.NewRequest(http.MethodPost, ci.ControlBase+"/__omac__/reload-global", nil)
+	if err != nil {
+		return false, "reload-global request build failed"
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Sprintf("omac serve not reachable at %s (stale control file?)", ci.ControlBase)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, "reloaded global skills in running omac serve"
+	}
+	return false, fmt.Sprintf("omac serve reload-global returned %d", resp.StatusCode)
+}

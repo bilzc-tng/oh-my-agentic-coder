@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tngtech/oh-my-agentic-coder/internal/facade"
@@ -256,6 +258,33 @@ func TestEnsureServeSubcommand(t *testing.T) {
 				break
 			}
 		}
+	}
+}
+
+func TestReloadGlobalsEmptyIsNoop(t *testing.T) {
+	s := newServeServerForTest(t)
+	// No global skills registered (isolated HOME/XDG), so reloadGlobals
+	// just tears down nothing and re-activates nothing.
+	if err := s.reloadGlobals(); err != nil {
+		t.Fatalf("reloadGlobals: %v", err)
+	}
+	if len(s.global) != 0 {
+		t.Errorf("global count = %d, want 0", len(s.global))
+	}
+}
+
+func TestReloadGlobalEndpointExists(t *testing.T) {
+	s := newServeServerForTest(t)
+	mux := s.controlMux()
+	req := httptest.NewRequest("POST", "/__omac__/reload-global", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	// With no global skills it should still succeed (200) and return a list.
+	if rec.Code != 200 {
+		t.Fatalf("reload-global status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "skills") {
+		t.Errorf("reload-global body missing skills: %s", rec.Body.String())
 	}
 }
 

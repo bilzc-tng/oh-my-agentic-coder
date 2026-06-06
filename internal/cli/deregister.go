@@ -121,10 +121,14 @@ func runDeregister(args []string, env *Env) int {
 	}
 	fmt.Fprintln(env.Stdout)
 
-	// Ask a running omac serve to reload this directory so the deregistered
-	// skill is dropped without a restart (workdir-local only; global skills
-	// only re-activate at serve cold start).
-	if !global {
+	// Ask a running omac serve to reload so the deregistered skill is dropped
+	// without a restart: reload the global layer for a global skill, else the
+	// workdir.
+	if global {
+		if ok, msg := notifyReloadGlobal(); ok {
+			fmt.Fprintf(env.Stdout, "[ok] %s\n", msg)
+		}
+	} else {
 		if ok, msg := notifyReload(env.Workdir); ok {
 			fmt.Fprintf(env.Stdout, "[ok] %s\n", msg)
 		}

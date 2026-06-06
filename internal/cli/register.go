@@ -294,11 +294,12 @@ func runRegister(args []string, env *Env) int {
 
 	if global {
 		fmt.Fprintf(env.Stdout, "\n[ok] registered %s (global; available in every workdir)\n", skillName)
-		// Global skills are only activated at serve cold start, so a reload
-		// of one directory cannot bring them up. Tell the user plainly.
-		if _, running := readControlInfo(); running {
-			fmt.Fprintf(env.Stdout,
-				"[info] a global skill change requires restarting `omac serve` to take effect.\n")
+		// Ask a running omac serve to re-activate the global layer so the
+		// newly-registered global skill is mounted without a restart.
+		if ok, msg := notifyReloadGlobal(); ok {
+			fmt.Fprintf(env.Stdout, "[ok] %s\n", msg)
+		} else if msg != "" && msg != "no running omac serve detected" {
+			fmt.Fprintf(env.Stdout, "[info] %s\n", msg)
 		}
 	} else {
 		fmt.Fprintf(env.Stdout, "\n[ok] registered %s (workdir=%s)\n", skillName, env.Workdir)
