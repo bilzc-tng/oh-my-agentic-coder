@@ -113,7 +113,11 @@ export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }
         console.error(`[omac] ${path} -> ${res.status}: ${text}`)
         return null
       }
-      return (await res.json()) as DirManifest
+      const m = (await res.json()) as DirManifest
+      // omac serializes an empty skills slice as JSON null (not []). Normalize
+      // so every downstream `.skills` access is safe.
+      if (m && !Array.isArray(m.skills)) m.skills = []
+      return m
     } catch (err) {
       console.error(`[omac] ${path} request failed:`, err)
       return null
@@ -173,7 +177,7 @@ export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }
         "root URL for that skill's sidecar; append the skill's documented path.",
     )
     lines.push("")
-    for (const sk of m.skills.sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const sk of (m.skills ?? []).slice().sort((a, b) => a.name.localeCompare(b.name))) {
       if (sk.state === "ready" && sk.base) {
         lines.push(`- **${sk.name}** (${sk.scope}) — ready — base: \`${sk.base}\``)
       } else if (sk.state === "pending-credentials") {
@@ -236,7 +240,7 @@ export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }
       // state (e.g. a pending-credentials skill that has since been
       // supplied a secret and reloaded).
       let m = (await activate(dir, true)) ?? manifests.get(dir)
-      if (!m || m.skills.length === 0) return
+      if (!m || !m.skills || m.skills.length === 0) return
       output.system.push(renderManifest(m))
     },
 
@@ -246,7 +250,7 @@ export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }
       const dir = await dirForSession(input.sessionID)
       if (!dir) return
       const m = manifests.get(dir)
-      if (!m) return
+      if (!m || !m.skills) return
       for (const sk of m.skills) {
         if (sk.state !== "ready" || !sk.base) continue
         if (sk.scope === "global") {

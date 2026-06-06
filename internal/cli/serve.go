@@ -838,7 +838,9 @@ func (s *serveServer) clearFlatAliases() {
 func (s *serveServer) manifestFor(d *dirState) map[string]any {
 	d.mu.Lock()
 	state := d.State
-	var skills []map[string]any
+	// Non-nil so an empty manifest serializes as `"skills": []`, not null
+	// (clients otherwise crash on a null skills list).
+	skills := make([]map[string]any, 0, len(d.Skills))
 	for _, sr := range d.Skills {
 		skills = append(skills, s.skillJSON(sr, "workdir"))
 	}
@@ -969,7 +971,7 @@ func (s *serveServer) handleReload(w http.ResponseWriter, r *http.Request) {
 
 func (s *serveServer) handleDirs(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	var dirs []map[string]string
+	dirs := make([]map[string]string, 0, len(s.dirs))
 	for _, d := range s.dirs {
 		d.mu.Lock()
 		dirs = append(dirs, map[string]string{"dir": d.Dir, "dir_token": d.Token, "state": d.State})
@@ -982,7 +984,7 @@ func (s *serveServer) handleDirs(w http.ResponseWriter, r *http.Request) {
 
 func (s *serveServer) handleGlobal(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
-	var skills []map[string]any
+	skills := make([]map[string]any, 0, len(s.global))
 	for _, sr := range s.global {
 		skills = append(skills, s.skillJSON(sr, "global"))
 	}
