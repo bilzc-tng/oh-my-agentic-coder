@@ -103,11 +103,49 @@ go build -o omac ./cmd/omac
 ## Test
 
 ```bash
+# Unit + integration tests for every package.
 go test ./...
+
+# Formatting and static checks (run both before committing).
+gofmt -l .        # prints nothing when clean
+go vet ./...
 ```
 
-The facade test skips automatically in environments where Unix-socket
-`connect(2)` is disallowed.
+Some facade and serve tests open a loopback TCP port (and/or a Unix
+socket) and skip automatically in environments where `connect(2)` to
+`127.0.0.1` or to a Unix socket is disallowed (e.g. a hardened sandbox).
+On a normal dev machine they all run.
+
+### Multi-directory serve mode (`omac serve`)
+
+End-to-end smoke test of the control plane, facade routing, per-workdir
+isolation, and a real skill round trip (requires loopback; needs `curl`
+and `python3`):
+
+```bash
+bash scripts/serve_smoke.sh        # expect "PASS=15  FAIL=0 / ALL GREEN"
+```
+
+The OpenCode-side plugin (`.opencode/plugins/omac-multidir.ts`)
+typechecks against the published plugin types:
+
+```bash
+cd .opencode
+npx -p typescript tsc --noEmit --strict --moduleResolution bundler \
+  --module esnext --target es2022 --lib es2022,dom --skipLibCheck \
+  plugins/omac-multidir.ts
+```
+
+To try it with a real OpenCode server, see
+[`docs/MULTI_DIR_DESKTOP.md`](docs/MULTI_DIR_DESKTOP.md):
+
+```bash
+# Wrap `opencode serve`; --root pre-declares the allowed project roots.
+omac serve --no-sandbox --root "$HOME/code" --verbose -- --port 4096 --print-logs
+# Note the logged "control plane on http://127.0.0.1:<CTRL>", then open a
+# project under the root in OpenCode Desktop and confirm activation:
+#   curl -s http://127.0.0.1:<CTRL>/__omac__/dirs | python3 -m json.tool
+```
 
 ## Typical workflow
 
