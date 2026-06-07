@@ -3,6 +3,7 @@ package cli
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -11,7 +12,7 @@ func newStartReloaderForTest(t *testing.T) *startReloader {
 	isolateHome(t)
 	return &startReloader{
 		env:     makeEnv(t.TempDir()),
-		mounted: map[string]struct{}{},
+		mounted: map[string]string{},
 	}
 }
 
@@ -20,7 +21,8 @@ func TestStartReloaderMountedTracking(t *testing.T) {
 	if r.isMounted("slack") {
 		t.Fatal("nothing should be mounted yet")
 	}
-	r.markMounted("slack", "email")
+	r.markMounted("slack", "slack")
+	r.markMounted("email", "email")
 	if !r.isMounted("slack") || !r.isMounted("email") {
 		t.Error("markMounted did not record names")
 	}
@@ -52,7 +54,7 @@ func TestStartReloaderReloadSkipsMissingSecret(t *testing.T) {
 
 func TestStartReloaderDirsEndpoint(t *testing.T) {
 	r := newStartReloaderForTest(t)
-	r.markMounted("slack")
+	r.markMounted("slack", "slack")
 	mux := r.startTestMux()
 	req := httptest.NewRequest("GET", "/__omac__/dirs", nil)
 	rec := httptest.NewRecorder()
@@ -65,10 +67,39 @@ func TestStartReloaderDirsEndpoint(t *testing.T) {
 	}
 }
 
+func TestStartReloaderActivateNot404(t *testing.T) {
+	r := newStartReloaderForTest(t)
+	r.markMounted("slack", "slack")
+	mux := r.startTestMux()
+
+	// The plugin (built for serve) calls activate; start must answer 200 with
+	// a serve-shaped manifest, not 404.
+	body := `{"dir":"` + r.env.Workdir + `"}`
+	req := httptest.NewRequest("POST", "/__omac__/activate", stringReader(body))
+	req.Header.Set("content-type", "application/json")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("activate status=%d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	out := rec.Body.String()
+	for _, want := range []string{`"skills"`, `"dir_token"`, `"slack"`, `"base"`} {
+		if !contains(out, want) {
+			t.Errorf("activate manifest missing %s: %s", want, out)
+		}
+	}
+}
+
 // startTestMux builds the same routes startControlPlane wires, for testing.
 func (r *startReloader) startTestMux() *http.ServeMux {
 	m := http.NewServeMux()
 	m.HandleFunc("/__omac__/reload", r.handleReload)
 	m.HandleFunc("/__omac__/dirs", r.handleDirs)
+	m.HandleFunc("/__omac__/activate", r.handleActivate)
+	m.HandleFunc("/__omac__/deactivate", r.handleActivate)
+	m.HandleFunc("/__omac__/reload-global", r.handleReloadGlobalStart)
 	return m
 }
+
+func stringReader(s string) *strings.Reader { return strings.NewReader(s) }
+func contains(s, sub string) bool           { return strings.Contains(s, sub) }

@@ -464,10 +464,10 @@ func runStart(args []string, env *Env) int {
 	reloader := &startReloader{
 		env: env, facade: f, sup: sup, ctx: ctx,
 		rtDir: rtDir, socket: socketPath, tcpPort: tcpPort, verbose: *verbose,
-		mounted: map[string]struct{}{},
+		mounted: map[string]string{},
 	}
-	for _, a := range armed {
-		reloader.markMounted(a.entry.Name)
+	for i, a := range armed {
+		reloader.markMounted(a.entry.Name, a.meta.Sidecar.MountOrDefault(running[i].Name))
 	}
 	controlURL, closeControl, controlOK := startControlPlane(reloader)
 	defer closeControl()

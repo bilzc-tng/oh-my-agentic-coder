@@ -13,6 +13,7 @@ import (
 	"github.com/tngtech/oh-my-agentic-coder/internal/facade"
 	"github.com/tngtech/oh-my-agentic-coder/internal/keychain"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
+	"github.com/tngtech/oh-my-agentic-coder/internal/sandbox"
 	"github.com/tngtech/oh-my-agentic-coder/internal/secrets"
 	"github.com/tngtech/oh-my-agentic-coder/internal/skillconfig"
 	"github.com/tngtech/oh-my-agentic-coder/internal/supervisor"
@@ -38,7 +39,7 @@ type startReloader struct {
 	verbose bool
 
 	mu      sync.Mutex
-	mounted map[string]struct{} // skill names already mounted
+	mounted map[string]string // skill name -> mount, for skills mounted on the facade
 }
 
 // startControlPlane binds a loopback control-plane HTTP server for start and
@@ -54,6 +55,13 @@ func startControlPlane(r *startReloader) (controlURL string, closeFn func(), ok 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/__omac__/reload", r.handleReload)
 	mux.HandleFunc("/__omac__/dirs", r.handleDirs)
+	// The omac plugin (built for serve) calls activate/deactivate. In the
+	// single-workdir start model "activate <dir>" maps to a reload of our
+	// one workdir; we accept it and return a serve-shaped manifest so the
+	// plugin works unchanged instead of 404-spamming.
+	mux.HandleFunc("/__omac__/activate", r.handleActivate)
+	mux.HandleFunc("/__omac__/deactivate", r.handleActivate) // no-op deactivate, same response
+	mux.HandleFunc("/__omac__/reload-global", r.handleReloadGlobalStart)
 	srv := &http.Server{Handler: mux}
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -67,14 +75,13 @@ func startControlPlane(r *startReloader) (controlURL string, closeFn func(), ok 
 	}, true
 }
 
-func (r *startReloader) markMounted(names ...string) {
+// markMounted records a skill (name -> facade mount) as mounted.
+func (r *startReloader) markMounted(name, mount string) {
 	r.mu.Lock()
 	if r.mounted == nil {
-		r.mounted = map[string]struct{}{}
+		r.mounted = map[string]string{}
 	}
-	for _, n := range names {
-		r.mounted[n] = struct{}{}
-	}
+	r.mounted[name] = mount
 	r.mu.Unlock()
 }
 
@@ -86,16 +93,10 @@ func (r *startReloader) isMounted(name string) bool {
 }
 
 func (r *startReloader) handleDirs(w http.ResponseWriter, _ *http.Request) {
-	r.mu.Lock()
-	names := make([]string, 0, len(r.mounted))
-	for n := range r.mounted {
-		names = append(names, n)
-	}
-	r.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":    "start",
 		"workdir": r.env.Workdir,
-		"mounted": names,
+		"dirs":    []map[string]any{{"dir": r.env.Workdir, "state": "active"}},
 	})
 }
 
@@ -104,12 +105,70 @@ func (r *startReloader) handleReload(w http.ResponseWriter, req *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
 		return
 	}
-	added := r.reload()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"mode":    "start",
-		"workdir": r.env.Workdir,
-		"added":   added,
-	})
+	r.reload()
+	writeJSON(w, http.StatusOK, r.manifest())
+}
+
+// handleActivate accepts the plugin's activate/deactivate calls. start has a
+// single fixed workdir, so we treat activate as a reload of that workdir and
+// reply with a serve-shaped manifest. A request for a different directory
+// gets an empty manifest (start only knows its own workdir).
+func (r *startReloader) handleActivate(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	dir, _ := decodeDir(req)
+	if dir != "" && dir != r.env.Workdir {
+		// Not our workdir — report it as having no start-managed skills.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"dir": dir, "dir_token": "", "state": "active",
+			"skills": []map[string]any{},
+		})
+		return
+	}
+	r.reload()
+	writeJSON(w, http.StatusOK, r.manifest())
+}
+
+func (r *startReloader) handleReloadGlobalStart(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+		return
+	}
+	// start has no separate global layer; a reload covers everything.
+	r.reload()
+	writeJSON(w, http.StatusOK, map[string]any{"skills": []map[string]any{}})
+}
+
+// manifest renders start's mounted skills in the serve manifest shape the
+// plugin expects. start uses FLAT mounts (no dir token), so base URLs are
+// http://127.0.0.1:<tcp>/<mount> and dir_token is empty.
+func (r *startReloader) manifest() map[string]any {
+	r.mu.Lock()
+	pairs := make([][2]string, 0, len(r.mounted))
+	for name, mount := range r.mounted {
+		pairs = append(pairs, [2]string{name, mount})
+	}
+	r.mu.Unlock()
+
+	skills := make([]map[string]any, 0, len(pairs))
+	for _, p := range pairs {
+		name, mount := p[0], p[1]
+		skills = append(skills, map[string]any{
+			"name":  name,
+			"scope": "workdir",
+			"mount": mount,
+			"state": "ready",
+			"base":  sandbox.OmacTCPEnvValue(mount, r.tcpPort),
+		})
+	}
+	return map[string]any{
+		"dir":       r.env.Workdir,
+		"dir_token": "",
+		"state":     "active",
+		"skills":    skills,
+	}
 }
 
 // reload scans the workdir for registered skills that aren't mounted yet and
@@ -211,7 +270,7 @@ func (r *startReloader) reload() []string {
 			Skill:        e.Name,
 			State:        facade.RouteReady,
 		})
-		r.markMounted(e.Name)
+		r.markMounted(e.Name, mount)
 		added = append(added, mount)
 		if r.verbose {
 			fmt.Fprintf(r.env.Stderr, "[verbose] reload: mounted %s at /%s\n", e.Name, mount)
