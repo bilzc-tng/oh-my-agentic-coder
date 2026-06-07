@@ -371,3 +371,25 @@ func TestBaseEnvOmitsNonoNoSaveWhenUpdateSandbox(t *testing.T) {
 		t.Errorf("with --update-sandbox, NONO_NO_SAVE must not be set")
 	}
 }
+
+func TestCheckGlobalDriftRefusesUnregistered(t *testing.T) {
+	s := newServeServerForTest(t)
+	// Stage a global skill on disk but never register it.
+	stageUserGlobalSkill(t, "weather")
+
+	code := s.checkGlobalDrift()
+	if code == ExitOK {
+		t.Fatal("expected serve to refuse on an unregistered global skill")
+	}
+	if code != ExitPrerequisiteMissing {
+		t.Errorf("exit code = %d, want ExitPrerequisiteMissing (%d)", code, ExitPrerequisiteMissing)
+	}
+}
+
+func TestCheckGlobalDriftCleanWhenNoGlobals(t *testing.T) {
+	s := newServeServerForTest(t)
+	// Isolated HOME/XDG => no global skills at all.
+	if code := s.checkGlobalDrift(); code != ExitOK {
+		t.Errorf("expected ExitOK with no global skills, got %d", code)
+	}
+}

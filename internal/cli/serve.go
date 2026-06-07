@@ -159,7 +159,14 @@ func runServe(args []string, env *Env) int {
 		global:        map[string]*skillRoute{},
 	}
 
-	// Cold start: activate user-global skills once, under /__global__/ (§5.1).
+	// Cold start: global skills are a fixed, known set, so — unlike the lazy
+	// workdir-local skills — we validate them up front and refuse to start on
+	// drift, mirroring `omac start`. Workdir skills stay lazy/auto-registered.
+	if code := srv.checkGlobalDrift(); code != ExitOK {
+		return code
+	}
+
+	// Activate user-global skills once, under /__global__/ (§5.1).
 	if err := srv.activateGlobals(); err != nil {
 		fmt.Fprintln(env.Stderr, "omac serve: activate globals:", err)
 		return ExitIOError
@@ -429,6 +436,103 @@ func (s *serveServer) dirActLock(absDir string) *sync.Mutex {
 }
 
 // ---- cold-start: global skills ----
+
+// checkGlobalDrift validates the user-global skill layer at cold start and
+// refuses to start (mirroring `omac start`) if any global skill is:
+//   - present on disk under a global skills root but NOT registered, or
+//   - registered but its bundle hash has drifted since register (unless
+//     --accept-skill-changes), or
+//   - registered but its omac.yaml is now broken/missing a sidecar block.
+//
+// Global skills are a fixed, known-at-startup set, so surfacing these here
+// (with the same actionable `omac register` hints as start) is appropriate;
+// workdir-local skills remain lazy and auto-registered on activation.
+//
+// Returns ExitOK when clean, or a non-zero exit code to abort serve.
+func (s *serveServer) checkGlobalDrift() int {
+	gReg, err := registry.LoadGlobal()
+	if err != nil {
+		fmt.Fprintln(s.env.Stderr, "omac serve: global registry:", err)
+		return ExitIOError
+	}
+	registered := map[string]struct{}{}
+	for _, e := range gReg.Registered {
+		registered[e.Name] = struct{}{}
+	}
+
+	// 1. Unregistered global skills on disk. Discover everything visible to
+	//    the active harness, keep only the user-global ones, and flag any
+	//    that aren't in the global registry.
+	discovered, derr := skillsource.Discover(s.env.Workdir, s.harness)
+	if derr != nil {
+		fmt.Fprintln(s.env.Stderr, "omac serve: scan global skills:", derr)
+		return ExitIOError
+	}
+	var unregistered []string
+	for _, e := range discovered {
+		if e.Kind != "user-global" {
+			continue
+		}
+		if _, ok := registered[e.Name]; !ok {
+			unregistered = append(unregistered, e.Name)
+		}
+	}
+	sort.Strings(unregistered)
+
+	// 2. Bundle-hash drift + broken meta on registered globals.
+	var drifted, brokenMeta []string
+	for _, e := range gReg.Registered {
+		absDir := e.SkillDir
+		if !filepath.IsAbs(absDir) {
+			continue
+		}
+		if !skillsource.DirInHarnessScope(absDir, s.harness) {
+			continue // not loadable by this harness; activateGlobals skips it too
+		}
+		m, merr := config.LoadMeta(filepath.Join(absDir, config.MetaFileName))
+		if merr != nil || m.Sidecar == nil {
+			brokenMeta = append(brokenMeta, e.Name)
+			continue
+		}
+		if !s.acceptChanges {
+			if bundle, herr := config.BundleHash(absDir); herr == nil && bundle != e.BundleHash {
+				drifted = append(drifted, e.Name)
+			}
+		}
+	}
+	sort.Strings(drifted)
+	sort.Strings(brokenMeta)
+
+	if len(unregistered) == 0 && len(drifted) == 0 && len(brokenMeta) == 0 {
+		return ExitOK
+	}
+
+	total := len(unregistered) + len(drifted) + len(brokenMeta)
+	fmt.Fprintf(s.env.Stderr, "omac serve: refusing to start, %d global-skill problem(s):\n", total)
+	if len(brokenMeta) > 0 {
+		fmt.Fprintln(s.env.Stderr, "\n  "+config.MetaFileName+" broken:")
+		for _, n := range brokenMeta {
+			fmt.Fprintf(s.env.Stderr, "    %s — re-register: omac register --force %s\n", n, n)
+		}
+	}
+	if len(unregistered) > 0 {
+		fmt.Fprintln(s.env.Stderr, "\n  global skill present but not registered:")
+		for _, n := range unregistered {
+			fmt.Fprintf(s.env.Stderr, "    %s — run: omac register %s\n", n, n)
+		}
+	}
+	if len(drifted) > 0 {
+		fmt.Fprintln(s.env.Stderr, "\n  bundle changed since register (re-register, or pass --accept-skill-changes):")
+		for _, n := range drifted {
+			fmt.Fprintf(s.env.Stderr, "    %s — omac register --force %s\n", n, n)
+		}
+	}
+	fmt.Fprintln(s.env.Stderr)
+	if len(unregistered) > 0 || len(brokenMeta) > 0 {
+		return ExitPrerequisiteMissing
+	}
+	return ExitConfigInvalid
+}
 
 func (s *serveServer) activateGlobals() error {
 	gReg, err := registry.LoadGlobal()
