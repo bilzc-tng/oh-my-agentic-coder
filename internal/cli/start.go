@@ -34,10 +34,13 @@ func runStart(args []string, env *Env) int {
 		noSandbox          = fs.Bool("no-sandbox", false, "Run inner command directly, without a sandbox (debug only).")
 		keepRunning        = fs.Bool("keep-running", false, "Do not stop sidecars when the inner command exits.")
 		acceptSkillChanges = fs.Bool("accept-skill-changes", false, "Tolerate bundle_hash drift in registered skills (proceed even if the on-disk skill differs from what was registered).")
+		updateSandbox      = fs.Bool("update-sandbox", false, "Allow the sandbox runtime (nono) to interactively persist profile/policy changes (e.g. saving override_deny paths). Off by default: omac sets NONO_NO_SAVE so a run never silently weakens the sandbox profile.")
 		verbose            = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: omac start [flags] [-- inner args...]")
+		fmt.Fprintln(env.Stderr, "Usage: omac start [harness] [flags] [-- inner args...]")
+		fmt.Fprintf(env.Stderr, "\nharness: one of %s (default: %s)\n\n",
+			strings.Join(config.HarnessNames(), ", "), config.DefaultHarness().Name)
 		fs.PrintDefaults()
 	}
 	// Preserve everything after "--" verbatim as inner args.
@@ -53,6 +56,14 @@ func runStart(args []string, env *Env) int {
 		} else {
 			ourArgs = append(ourArgs, a)
 		}
+	}
+	// Consume the optional leading positional harness token (e.g.
+	// `omac start claude`) before flag parsing. The remainder is parsed as
+	// flags (+ any non-flag positionals, which become inner args).
+	harness, ourArgs, err := splitHarnessToken(ourArgs)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start:", err)
+		return ExitMisuse
 	}
 	if err := fs.Parse(reorderFlagsFirst(ourArgs)); err != nil {
 		return ExitMisuse
@@ -133,6 +144,15 @@ func runStart(args []string, env *Env) int {
 			p, p)
 	}
 
+	// Harness scoping: drop registry entries whose skill dir belongs to
+	// another harness (e.g. a global skill under ~/.config/opencode/skills
+	// while running `omac start claude`). The active harness cannot load
+	// them, so omac must not mount or require them. Entries under the active
+	// harness's own dir or the shared .agents dir, or under no recognizable
+	// skills base, are kept.
+	workdirReg = filterRegistryByHarness(workdirReg, env.Workdir, harness)
+	globalReg = filterRegistryByHarness(globalReg, env.Workdir, harness)
+
 	// Merge the two layers into the working registry used by the rest
 	// of start. Workdir entries win over global entries with the same
 	// name.
@@ -145,7 +165,7 @@ func runStart(args []string, env *Env) int {
 	//     "Skill" here means a directory with a omac.yaml. The user
 	//     must explicitly register each one (so registration prompts,
 	//     keychain seeding, etc. don't get silently skipped).
-	unregistered, err := findUnregisteredSkills(env.Workdir, reg)
+	unregistered, err := findUnregisteredSkills(env.Workdir, harness, reg)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: scan skills:", err)
 		return ExitIOError
@@ -393,15 +413,16 @@ func runStart(args []string, env *Env) int {
 			health = *s.meta.Sidecar.Health
 		}
 		specs = append(specs, supervisor.SidecarSpec{
-			Name:           s.entry.Name,
-			SkillDir:       s.abs,
-			Command:        s.meta.Sidecar.Command,
-			EnvPassthrough: s.meta.Sidecar.EnvPassthrough,
-			Secrets:        s.secrets,
-			Config:         s.config,
-			Health:         health.Defaults(),
-			LogPath:        filepath.Join(rtDir, "logs", s.entry.Name+".log"),
-			Workdir:        env.Workdir,
+			Name:             s.entry.Name,
+			SkillDir:         s.abs,
+			Command:          s.meta.Sidecar.Command,
+			EnvPassthrough:   s.meta.Sidecar.EnvPassthrough,
+			Secrets:          s.secrets,
+			Config:           s.config,
+			Health:           health.Defaults(),
+			LogPath:          filepath.Join(rtDir, "logs", s.entry.Name+".log"),
+			Workdir:          env.Workdir,
+			HarnessSkillsDir: harness.WorkdirSkillsDir(),
 		})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -429,6 +450,7 @@ func runStart(args []string, env *Env) int {
 			MaxBodyBytes: maxBody,
 			IdleTimeout:  idle,
 			Skill:        r.Name,
+			SkillDir:     armed[i].abs,
 		})
 		mounts = append(mounts, mount)
 	}
@@ -476,14 +498,11 @@ func runStart(args []string, env *Env) int {
 	}
 
 	// 8. Build sandbox argv and exec.
-	inner := prof.InnerCmd
-	if *innerCmdOverride != "" {
-		if len(inner) == 0 {
-			inner = []string{*innerCmdOverride}
-		} else {
-			inner = append([]string{*innerCmdOverride}, inner[1:]...)
-		}
-	}
+	//
+	// Resolve the inner command for the selected harness: an explicit
+	// --inner override wins, else the profile's inner_cmd, else the
+	// harness's default InnerCmd (config.Harness.ResolveInnerCmd).
+	inner := harness.ResolveInnerCmd(prof.InnerCmd, *innerCmdOverride)
 	if len(innerArgs) > 0 {
 		inner = append(inner, innerArgs...)
 	}
@@ -533,12 +552,14 @@ func runStart(args []string, env *Env) int {
 	// under nono proxy mode), and fall back to OMAC_<SKILL>_SOCKET_BASE
 	// for environments that prefer Unix sockets.
 	extra := map[string]string{
-		"OMAC_SOCKET":  socketPath,
-		"OMAC_HOST":    "127.0.0.1",
-		"OMAC_PORT":    fmt.Sprintf("%d", tcpPort),
-		"OMAC_BASE":    fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
-		"OMAC_SKILLS":  strings.Join(mounts, ","),
-		"OMAC_VERSION": env.Version,
+		"OMAC_SOCKET":             socketPath,
+		"OMAC_HOST":               "127.0.0.1",
+		"OMAC_PORT":               fmt.Sprintf("%d", tcpPort),
+		"OMAC_BASE":               fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
+		"OMAC_SKILLS":             strings.Join(mounts, ","),
+		"OMAC_VERSION":            env.Version,
+		"OMAC_HARNESS":            harness.Name,
+		"OMAC_HARNESS_SKILLS_DIR": harness.WorkdirSkillsDir(),
 	}
 	for _, m := range mounts {
 		extra[sandbox.OmacEnvName(m)] = sandbox.OmacTCPEnvValue(m, tcpPort)
@@ -546,6 +567,18 @@ func runStart(args []string, env *Env) int {
 	}
 	if controlOK {
 		extra["OMAC_CONTROL_BASE"] = controlURL
+	}
+	// Sandbox hardening: by default forbid the sandbox runtime from
+	// interactively persisting profile/policy changes during a run. nono's
+	// `run` offers to save the paths a denied run needed — including
+	// override_deny entries that weaken the profile — whenever a named
+	// profile is used and the child hits a policy denial on a terminal. That
+	// must be an explicit, opt-in action, never an automatic side effect of
+	// `omac start`. NONO_NO_SAVE suppresses the offer (see nono
+	// profile_save_runtime.rs). --update-sandbox re-enables it so the user
+	// can deliberately update the profile.
+	if !*updateSandbox {
+		extra["NONO_NO_SAVE"] = "1"
 	}
 
 	code, err := sandbox.ExecWithReady(argv, extra, nil)
@@ -675,8 +708,30 @@ func mergeConfig(global, workdir *skillconfig.Store) *skillconfig.Store {
 // skillsource package for the full precedence list. Workdir-local
 // skills always win over user-global ones with the same name;
 // skillsource.Discover handles dedup internally.
-func findUnregisteredSkills(workdir string, reg *registry.Registry) ([]string, error) {
-	discovered, err := skillsource.Discover(workdir)
+// filterRegistryByHarness returns a copy of reg keeping only entries whose
+// skill directory is in the active harness's scope. A relative SkillDir (as
+// stored for workdir-local skills) is classified by its path segments; an
+// absolute one (global skills) likewise. Entries under no recognizable skills
+// base are kept (custom locations are not silently dropped).
+func filterRegistryByHarness(reg *registry.Registry, workdir string, harness config.Harness) *registry.Registry {
+	if reg == nil {
+		return reg
+	}
+	out := &registry.Registry{Version: reg.Version}
+	for _, e := range reg.Registered {
+		dir := e.SkillDir
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(workdir, dir)
+		}
+		if skillsource.DirInHarnessScope(dir, harness) {
+			out.Registered = append(out.Registered, e)
+		}
+	}
+	return out
+}
+
+func findUnregisteredSkills(workdir string, harness config.Harness, reg *registry.Registry) ([]string, error) {
+	discovered, err := skillsource.Discover(workdir, harness)
 	if err != nil {
 		return nil, err
 	}

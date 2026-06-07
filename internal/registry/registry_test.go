@@ -112,3 +112,47 @@ func TestLoadGlobalMissingIsEmpty(t *testing.T) {
 		t.Fatalf("expected empty registry, got %+v", r)
 	}
 }
+
+func TestUpsertPerHarnessCoexist(t *testing.T) {
+	r := &Registry{}
+	r.Upsert(Entry{Name: "slack", Harness: "opencode", SkillDir: "/oc/slack"})
+	r.Upsert(Entry{Name: "slack", Harness: "claude-code", SkillDir: "/cc/slack"})
+	if len(r.Registered) != 2 {
+		t.Fatalf("want 2 coexisting entries, got %d", len(r.Registered))
+	}
+	// Updating one harness must not touch the other.
+	r.Upsert(Entry{Name: "slack", Harness: "opencode", SkillDir: "/oc/slack-v2"})
+	if len(r.Registered) != 2 {
+		t.Fatalf("update should not add an entry, got %d", len(r.Registered))
+	}
+	oc, _ := r.FindForHarness("slack", "opencode")
+	cc, _ := r.FindForHarness("slack", "claude-code")
+	if oc == nil || oc.SkillDir != "/oc/slack-v2" {
+		t.Errorf("opencode entry = %+v, want /oc/slack-v2", oc)
+	}
+	if cc == nil || cc.SkillDir != "/cc/slack" {
+		t.Errorf("claude entry = %+v, want /cc/slack", cc)
+	}
+}
+
+func TestFindForHarnessLegacyFallback(t *testing.T) {
+	r := &Registry{}
+	r.Upsert(Entry{Name: "old", SkillDir: "/legacy"}) // no harness
+	// A harness-specific lookup falls back to the legacy entry.
+	e, _ := r.FindForHarness("old", "claude-code")
+	if e == nil || e.SkillDir != "/legacy" {
+		t.Errorf("legacy fallback failed: %+v", e)
+	}
+}
+
+func TestUpsertUpgradesLegacyEntry(t *testing.T) {
+	r := &Registry{}
+	r.Upsert(Entry{Name: "x", SkillDir: "/old"})                         // legacy
+	r.Upsert(Entry{Name: "x", Harness: "opencode", SkillDir: "/scoped"}) // should replace legacy
+	if len(r.Registered) != 1 {
+		t.Fatalf("legacy entry should be upgraded in place, got %d entries", len(r.Registered))
+	}
+	if r.Registered[0].Harness != "opencode" || r.Registered[0].SkillDir != "/scoped" {
+		t.Errorf("entry not upgraded: %+v", r.Registered[0])
+	}
+}

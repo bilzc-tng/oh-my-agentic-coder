@@ -8,6 +8,68 @@ environment through a single Unix-domain-socket facade. Per-skill secrets are
 stored in the OS keychain and injected into sidecar processes at start time —
 they never reach the sandbox.
 
+## Choosing an inner harness
+
+omac is harness-agnostic: it launches an inner agentic coder inside the
+sandbox and exposes skills to it through a stable `OMAC_*` / REST contract. The
+harness is selected by an optional **positional token** after `start` / `serve`:
+
+```bash
+omac start            # default harness (opencode) — unchanged behavior
+omac start opencode   # OpenCode
+omac start claude     # Claude Code
+omac serve claude     # multi-directory server, Claude Code harness
+```
+
+Supported harnesses (and aliases): `opencode` (`oc`), `claude-code`
+(`claude`, `cc`). Omitting the token defaults to `opencode`. An unknown token
+is rejected with the list of supported names. Inner arguments that happen to be
+barewords go after `--` (e.g. `omac start claude -- --model sonnet`).
+
+Each harness ships a small client-side **bridge** that wires the agent to
+omac's control plane (skill activation, the skills manifest, skill base URLs):
+
+| Harness     | Bridge location              | Mechanism                         |
+| ----------- | ---------------------------- | --------------------------------- |
+| OpenCode    | `.opencode/plugins/`         | OpenCode plugin (`omac-multidir.ts`) |
+| Claude Code | `.claude/` (settings + hook) | `SessionStart`/`SessionEnd` hooks |
+
+Skills themselves are **harness-agnostic** — the same skill works unchanged
+under any harness. Adding a new agentic harness means registering one
+descriptor in `internal/config/harness.go` plus shipping its bridge; no
+command-dispatch code changes. See `CREATING_A_SKILL.md` and
+`docs/MULTI_DIR_DESKTOP.md`.
+
+### Harness-scoped skill discovery
+
+Each harness reads `SKILL.md` from its **own** skills directory, and omac
+matches that: discovery is scoped to the active harness.
+
+| Harness     | Own skills dir (workdir / global)              |
+| ----------- | ---------------------------------------------- |
+| OpenCode    | `.opencode/skills` / `~/.config/opencode/skills` |
+| Claude Code | `.claude/skills` / `~/.claude/skills`            |
+| *(shared)*  | `.agents/skills` / `~/.config/agents/skills`     |
+
+- The active harness scans **its own dir + the shared `.agents/skills`**, and
+  **never** the other harness's dir. So `omac start claude` ignores skills that
+  live only under `.opencode/skills`, and vice versa. Put a skill in
+  `.agents/skills` to share it across all harnesses.
+- A skill name can be **registered once per harness** (each pointing at that
+  harness's dir); registering for one harness does not disturb the other.
+- The marketplace `/install` defaults to the **active harness's** dir (so
+  installed skills land where that harness loads them); pass `target_path` to
+  override (e.g. `.agents/skills` for a shared skill).
+
+When a skill name is ambiguous at register time, omac stops and asks you to
+pick:
+
+```bash
+omac register slack                      # if ambiguous, prints the candidates
+omac register slack --harness claude     # pick the harness
+omac register slack --global             # pick the user-global one over workdir
+```
+
 ## Installation
 
 Pre-built binaries and packages are published to
@@ -163,11 +225,18 @@ To try it with a real OpenCode server, see
 
 ```bash
 # Wrap `opencode serve`; --root pre-declares the allowed project roots.
-omac serve --no-sandbox --root "$HOME/code" --verbose -- --port 4096 --print-logs
+# The positional harness token (opencode|claude) goes right after `serve`.
+omac serve opencode --no-sandbox --root "$HOME/code" --verbose -- --port 4096 --print-logs
 # Note the logged "control plane on http://127.0.0.1:<CTRL>", then open a
 # project under the root in OpenCode Desktop and confirm activation:
 #   curl -s http://127.0.0.1:<CTRL>/__omac__/dirs | python3 -m json.tool
 ```
+
+Under the Claude Code harness, `omac serve claude` / `omac start claude` run
+the `claude` CLI instead; the `.claude/` hooks bridge it to the same control
+plane. Claude Code has no `opencode serve`-style daemon convention, so it runs
+as-is (no subcommand is injected). See `docs/MULTI_DIR_DESKTOP.md` for the
+per-harness `serve` notes and limitations.
 
 ## Typical workflow
 
@@ -189,7 +258,8 @@ omac list
 omac secrets list slack
 
 # 5. Launch the full stack: sidecars → facade (Unix socket) → sandbox → agent.
-omac start
+omac start            # default harness (opencode)
+# or: omac start claude   # launch Claude Code as the inner harness instead
 
 # Inside the sandbox the skill reaches its sidecar via the socket:
 #   curl --unix-socket "$OMAC_SOCKET" http://x/slack/api/chat.postMessage ...
@@ -391,6 +461,16 @@ stream into a single response write.
 profile targets. This section explains exactly what needs to be
 configured so the facade is reachable from inside a nono sandbox, with
 references to the relevant nono documentation pages.
+
+### Sandbox profile is never silently weakened
+
+When a run hits a denied path, nono can interactively offer to **save those
+paths (including `override_deny` policy exceptions) into the profile**, which
+weakens the sandbox. omac does **not** allow that to happen automatically: by
+default it sets `NONO_NO_SAVE=1` for the sandbox runtime, so a run never
+persists profile/policy changes. To deliberately update the profile, pass
+`--update-sandbox` to `omac start` / `omac serve`, which lets nono prompt as
+usual. (Requires a nono build that honors `NONO_NO_SAVE`.)
 
 ### Two transports, by design
 

@@ -56,6 +56,12 @@ type SidecarSpec struct {
 	Health  config.HealthSpec
 	LogPath string
 	Workdir string // host workdir
+	// HarnessSkillsDir is the active harness's workdir-relative skills
+	// directory (e.g. ".opencode/skills", ".claude/skills"), injected as
+	// OMAC_HARNESS_SKILLS_DIR so skills that install into the project (the
+	// marketplace) default to the dir the running harness loads. Empty when
+	// no harness context is available.
+	HarnessSkillsDir string
 }
 
 // Running represents a started sidecar.
@@ -230,6 +236,9 @@ func (s *Supervisor) buildEnv(spec SidecarSpec, port int) []string {
 	}
 	vars["SIDECAR_SKILL"] = skillName
 	vars["OMAC_WORKDIR"] = spec.Workdir
+	if spec.HarnessSkillsDir != "" {
+		vars["OMAC_HARNESS_SKILLS_DIR"] = spec.HarnessSkillsDir
+	}
 
 	// Non-secret config fields. Win over passthrough; lose to secrets
 	// (which is also a meta-validation-time error, so practically these

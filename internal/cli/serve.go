@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,12 +50,15 @@ func runServe(args []string, env *Env) int {
 		innerCmdOverride = fs.String("inner", "", "Override inner_cmd's executable (default: opencode serve).")
 		noSandbox        = fs.Bool("no-sandbox", false, "Run the inner command directly, without a sandbox (debug only).")
 		noInner          = fs.Bool("no-inner", false, "Do not launch any inner command; run the control plane only (testing/headless).")
+		updateSandbox    = fs.Bool("update-sandbox", false, "Allow the sandbox runtime (nono) to interactively persist profile/policy changes. Off by default: omac sets NONO_NO_SAVE so a run never silently weakens the sandbox profile.")
 		verbose          = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	var roots multiFlag
 	fs.Var(&roots, "root", "Pre-declared root directory under which projects may be activated (§5.4 Option B). Repeatable. Empty = allow any directory.")
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: omac serve [flags] [-- inner args...]")
+		fmt.Fprintln(env.Stderr, "Usage: omac serve [harness] [flags] [-- inner args...]")
+		fmt.Fprintf(env.Stderr, "\nharness: one of %s (default: %s)\n\n",
+			strings.Join(config.HarnessNames(), ", "), config.DefaultHarness().Name)
 		fs.PrintDefaults()
 	}
 	// Preserve everything after "--" verbatim as inner args.
@@ -70,6 +74,13 @@ func runServe(args []string, env *Env) int {
 		} else {
 			ourArgs = append(ourArgs, a)
 		}
+	}
+	// Consume the optional leading positional harness token (e.g.
+	// `omac serve claude`) before flag parsing.
+	harness, ourArgs, err := splitHarnessToken(ourArgs)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac serve:", err)
+		return ExitMisuse
 	}
 	if err := fs.Parse(reorderFlagsFirst(ourArgs)); err != nil {
 		return ExitMisuse
@@ -132,6 +143,8 @@ func runServe(args []string, env *Env) int {
 
 	srv := &serveServer{
 		env:           env,
+		harness:       harness,
+		updateSandbox: *updateSandbox,
 		facade:        f,
 		sup:           sup,
 		ctx:           ctx,
@@ -204,30 +217,22 @@ func runServe(args []string, env *Env) int {
 		return ExitOK
 	}
 
-	// Build the inner argv. serve mode runs the OpenCode *server*, not the
-	// TUI — but the launcher profiles ship inner_cmd ["opencode"] (sized for
-	// `omac start`'s TUI). So serve resolves the executable from the profile
-	// (or --inner), then ensures the `serve` subcommand is present unless the
-	// caller already specified a subcommand via trailing `-- args`.
-	inner := prof.InnerCmd
+	// Build the inner argv. serve mode runs the selected harness's *server*
+	// form: the inner executable is resolved from the profile (or --inner, or
+	// the harness default), then the harness's ServerLaunch convention is
+	// applied — e.g. OpenCode gets `serve` inserted unless a subcommand is
+	// already present, while Claude Code (no server convention) runs as-is.
+	profileInner := prof.InnerCmd
 	if !profOK {
-		inner = nil
+		profileInner = nil
 	}
-	if *innerCmdOverride != "" {
-		if len(inner) == 0 {
-			inner = []string{*innerCmdOverride}
-		} else {
-			inner = append([]string{*innerCmdOverride}, inner[1:]...)
-		}
-	}
-	if len(inner) == 0 {
-		// No profile inner_cmd and no override: default to `opencode`.
-		inner = []string{"opencode"}
-	}
-	// Ensure the opencode server is launched. If the inner executable is
-	// `opencode` and no explicit subcommand follows (in the profile's
-	// inner_cmd tail or in trailing args), insert `serve`.
-	inner = ensureServeSubcommand(inner, innerArgs)
+	// Resolve the inner command for the selected harness: --inner override
+	// wins, else the profile's inner_cmd, else the harness default.
+	inner := harness.ResolveInnerCmd(profileInner, *innerCmdOverride)
+	// Apply the harness's server-launch convention (e.g. OpenCode injects
+	// `serve` when no subcommand is present). Harnesses without a server
+	// mode leave the inner command unchanged.
+	inner = harness.ApplyServerLaunch(inner, innerArgs)
 	if len(innerArgs) > 0 {
 		inner = append(inner, innerArgs...)
 	}
@@ -280,58 +285,6 @@ func runServe(args []string, env *Env) int {
 		return ExitSandboxAbnormal
 	}
 	return code
-}
-
-// ensureServeSubcommand makes sure an `opencode` inner command launches the
-// server. If inner[0] is "opencode" (or ends in "/opencode") and neither the
-// inner tail nor the trailing args already begin with a non-flag token (a
-// subcommand like "serve", "run", "tui"), it inserts "serve" right after the
-// executable. For any other executable it is a no-op.
-func ensureServeSubcommand(inner, trailing []string) []string {
-	if len(inner) == 0 {
-		return inner
-	}
-	exe := inner[0]
-	base := exe
-	if i := lastSlash(exe); i >= 0 {
-		base = exe[i+1:]
-	}
-	if base != "opencode" {
-		return inner
-	}
-	if hasSubcommand(inner[1:]) || hasSubcommand(trailing) {
-		return inner
-	}
-	out := make([]string, 0, len(inner)+1)
-	out = append(out, inner[0], "serve")
-	out = append(out, inner[1:]...)
-	return out
-}
-
-// hasSubcommand reports whether args begins with a non-flag positional
-// (i.e. a subcommand). Leading flags mean "no subcommand yet".
-func hasSubcommand(args []string) bool {
-	for _, a := range args {
-		if a == "" {
-			continue
-		}
-		if a[0] == '-' {
-			// A flag; keep scanning is wrong — a subcommand always comes
-			// first in CLI convention, so a leading flag means none.
-			return false
-		}
-		return true
-	}
-	return false
-}
-
-func lastSlash(s string) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == '/' {
-			return i
-		}
-	}
-	return -1
 }
 
 // controlPortOf returns the port the control-plane listener is bound to,
@@ -388,6 +341,7 @@ type skillRoute struct {
 	Name      string
 	Mount     string
 	Namespace string // dir token or facade.GlobalNamespace
+	SkillDir  string // skill's on-disk dir; source of SKILL.md auto-discovery
 	State     facade.RouteState
 	Detail    string
 	Missing   []string
@@ -403,6 +357,7 @@ type dirState struct {
 
 type serveServer struct {
 	env           *Env
+	harness       config.Harness // active harness; scopes skill discovery
 	facade        *facade.Facade
 	sup           *supervisor.Supervisor
 	ctx           context.Context
@@ -411,6 +366,7 @@ type serveServer struct {
 	tcpPort       int
 	controlBase   string
 	acceptChanges bool
+	updateSandbox bool // allow nono to persist profile changes (default off)
 	verbose       bool
 	roots         []string // §5.4 Option B; empty = allow any directory
 
@@ -489,6 +445,15 @@ func (s *serveServer) activateGlobals() error {
 			// Global entries should be absolute; skip otherwise.
 			continue
 		}
+		// Harness scoping: a global skill registered under another harness's
+		// dir (e.g. ~/.config/opencode/skills while running claude) is not
+		// loadable by the active harness, so omac does not activate it.
+		if !skillsource.DirInHarnessScope(absDir, s.harness) {
+			if s.verbose {
+				fmt.Fprintf(s.env.Stderr, "[verbose] global skill %s skipped (out of %s harness scope: %s)\n", e.Name, s.harness.Name, absDir)
+			}
+			continue
+		}
 		// Global skill: no single project, so OMAC_WORKDIR defaults to the
 		// server's launch workdir.
 		sr := s.bringUp(e, absDir, s.env.Workdir, facade.GlobalNamespace, "" /* unscoped secrets */, gCfg)
@@ -564,7 +529,7 @@ func (s *serveServer) activate(absDir string) (map[string]any, error) {
 	s.byToken[token] = d
 	s.mu.Unlock()
 
-	discovered, err := skillsource.Discover(absDir)
+	discovered, err := skillsource.Discover(absDir, s.harness)
 	if err != nil {
 		return nil, err
 	}
@@ -636,7 +601,7 @@ func (s *serveServer) activate(absDir string) (map[string]any, error) {
 func (s *serveServer) rediscover(d *dirState) {
 	absDir := d.Dir
 	token := d.Token
-	discovered, err := skillsource.Discover(absDir)
+	discovered, err := skillsource.Discover(absDir, s.harness)
 	if err != nil {
 		return
 	}
@@ -777,7 +742,7 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 	metaPath := filepath.Join(absDir, config.MetaFileName)
 	m, err := config.LoadMeta(metaPath)
 	if err != nil || m.Sidecar == nil {
-		sr := &skillRoute{Name: e.Name, Mount: e.Name, Namespace: namespace, State: facade.RouteBroken, Detail: "omac.yaml invalid or missing sidecar"}
+		sr := &skillRoute{Name: e.Name, Mount: e.Name, Namespace: namespace, SkillDir: absDir, State: facade.RouteBroken, Detail: "omac.yaml invalid or missing sidecar"}
 		s.installRoute(sr, 0)
 		return sr
 	}
@@ -785,7 +750,7 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 
 	if !s.acceptChanges {
 		if bundle, herr := config.BundleHash(absDir); herr == nil && bundle != e.BundleHash {
-			sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, State: facade.RouteBroken,
+			sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, SkillDir: absDir, State: facade.RouteBroken,
 				Detail: "bundle changed since register; re-register or pass --accept-skill-changes"}
 			s.installRoute(sr, 0)
 			return sr
@@ -808,7 +773,7 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 			continue
 		}
 		// keychain I/O error -> broken
-		sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, State: facade.RouteBroken, Detail: gerr.Error()}
+		sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, SkillDir: absDir, State: facade.RouteBroken, Detail: gerr.Error()}
 		s.installRoute(sr, 0)
 		return sr
 	}
@@ -837,7 +802,7 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 
 	if len(missing) > 0 {
 		sort.Strings(missing)
-		sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace,
+		sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, SkillDir: absDir,
 			State: facade.RoutePendingCredentials, Missing: missing,
 			Detail: fmt.Sprintf("missing required values: %v", missing)}
 		s.installRoute(sr, 0)
@@ -850,16 +815,17 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 		health = *m.Sidecar.Health
 	}
 	spec := supervisor.SidecarSpec{
-		Name:           namespace + "/" + e.Name, // unique tracking key across dirs
-		SkillName:      e.Name,                   // plain name -> SIDECAR_SKILL (no slash)
-		SkillDir:       absDir,
-		Command:        m.Sidecar.Command,
-		EnvPassthrough: m.Sidecar.EnvPassthrough,
-		Secrets:        secMap,
-		Config:         cfgMap,
-		Health:         health.Defaults(),
-		LogPath:        filepath.Join(s.rtDir, "logs", namespace+"-"+e.Name+".log"),
-		Workdir:        workdir, // -> OMAC_WORKDIR (the project, not the skill dir)
+		Name:             namespace + "/" + e.Name, // unique tracking key across dirs
+		SkillName:        e.Name,                   // plain name -> SIDECAR_SKILL (no slash)
+		SkillDir:         absDir,
+		Command:          m.Sidecar.Command,
+		EnvPassthrough:   m.Sidecar.EnvPassthrough,
+		Secrets:          secMap,
+		Config:           cfgMap,
+		Health:           health.Defaults(),
+		LogPath:          filepath.Join(s.rtDir, "logs", namespace+"-"+e.Name+".log"),
+		Workdir:          workdir, // -> OMAC_WORKDIR (the project, not the skill dir)
+		HarnessSkillsDir: s.harness.WorkdirSkillsDir(),
 	}
 	running, serr := s.sup.AddSidecar(s.ctx, spec)
 	// Wipe secret material now that the sidecar has been spawned (its env
@@ -871,11 +837,11 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 		spec.Secrets[name] = sec
 	}
 	if serr != nil {
-		sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, State: facade.RouteBroken, Detail: serr.Error()}
+		sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, SkillDir: absDir, State: facade.RouteBroken, Detail: serr.Error()}
 		s.installRoute(sr, 0)
 		return sr
 	}
-	sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, State: facade.RouteReady}
+	sr := &skillRoute{Name: e.Name, Mount: mount, Namespace: namespace, SkillDir: absDir, State: facade.RouteReady}
 	s.installRoute(sr, running.Port)
 	return sr
 }
@@ -890,12 +856,19 @@ func (s *serveServer) bringUp(e registry.Entry, absDir, workdir, namespace, secr
 // and reading the per-dir manifest (§6.3).
 func (s *serveServer) baseEnv() map[string]string {
 	extra := map[string]string{
-		"OMAC_SOCKET":       s.socketPath,
-		"OMAC_HOST":         "127.0.0.1",
-		"OMAC_PORT":         fmt.Sprintf("%d", s.tcpPort),
-		"OMAC_BASE":         fmt.Sprintf("http://127.0.0.1:%d/", s.tcpPort),
-		"OMAC_VERSION":      s.env.Version,
-		"OMAC_CONTROL_BASE": s.controlBase,
+		"OMAC_SOCKET":             s.socketPath,
+		"OMAC_HOST":               "127.0.0.1",
+		"OMAC_PORT":               fmt.Sprintf("%d", s.tcpPort),
+		"OMAC_BASE":               fmt.Sprintf("http://127.0.0.1:%d/", s.tcpPort),
+		"OMAC_VERSION":            s.env.Version,
+		"OMAC_CONTROL_BASE":       s.controlBase,
+		"OMAC_HARNESS":            s.harness.Name,
+		"OMAC_HARNESS_SKILLS_DIR": s.harness.WorkdirSkillsDir(),
+	}
+	// Forbid nono from interactively persisting profile/policy changes unless
+	// the user opted in with --update-sandbox (see start.go for rationale).
+	if !s.updateSandbox {
+		extra["NONO_NO_SAVE"] = "1"
 	}
 	// Global skills are known at cold start (§4.5/§5.1): inject their base
 	// URLs and list their mounts in OMAC_SKILLS.
@@ -960,6 +933,7 @@ func (s *serveServer) installRoute(sr *skillRoute, port int) {
 		Namespace:    sr.Namespace,
 		UpstreamPort: port,
 		Skill:        sr.Name,
+		SkillDir:     sr.SkillDir,
 		State:        sr.State,
 		Detail:       sr.Detail,
 	})
@@ -1006,7 +980,7 @@ func (s *serveServer) refreshSingleDirAliases() {
 		if port == 0 {
 			continue
 		}
-		s.facade.AddRoute(facade.Route{Mount: sr.Mount, Namespace: "", UpstreamPort: port, Skill: sr.Name, State: facade.RouteReady})
+		s.facade.AddRoute(facade.Route{Mount: sr.Mount, Namespace: "", UpstreamPort: port, Skill: sr.Name, SkillDir: sr.SkillDir, State: facade.RouteReady})
 		s.flatAliasMu.Lock()
 		if s.flatAliases == nil {
 			s.flatAliases = map[string]struct{}{}

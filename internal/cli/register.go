@@ -35,6 +35,8 @@ func runRegister(args []string, env *Env) int {
 		noFields        = fs.Bool("no-fields", false, "Skip all config-field prompts; caller promises to supply them at start time.")
 		fieldsFromPath  = fs.String("fields-from", "", "Read KEY=VALUE config fields from this file instead of prompting.")
 		useDefaults     = fs.Bool("defaults", false, "Non-interactive: use remembered global defaults where available; prompt only for values never set anywhere.")
+		harnessName     = fs.String("harness", "", "Resolve the skill in this harness's scope (opencode|claude). Default: opencode. Use to disambiguate a skill name present under multiple harnesses.")
+		globalOnly      = fs.Bool("global", false, "When a skill name exists both workdir-local and user-global, register the user-global one.")
 	)
 	fs.Usage = func() {
 		fmt.Fprintln(env.Stderr, "Usage: omac register <skill> [flags]")
@@ -49,20 +51,15 @@ func runRegister(args []string, env *Env) int {
 	}
 	skillName := fs.Arg(0)
 
-	// Locate the skill in the workdir-local layer first, then fall
-	// back to user-global. Within each layer, .agents/skills ranks
-	// above the legacy .opencode/skills; see skillsource for the
-	// full precedence list. The path that wins is recorded in the
-	// registry; downstream code (start, config show) just uses
-	// SkillDir verbatim, so the source layer is transparent after
-	// registration.
-	skillDir, src, err := skillsource.Resolve(env.Workdir, skillName)
-	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac register:", err)
-		if errors.Is(err, iofs.ErrNotExist) {
-			return ExitPrerequisiteMissing
-		}
-		return ExitConfigInvalid
+	// Locate the skill, honoring harness scope and disambiguation. Discovery
+	// is harness-scoped: each harness sees only its own skills dir plus the
+	// shared .agents dir. A skill name can be ambiguous across harnesses
+	// (same name under .opencode/skills and .claude/skills) or across scope
+	// (workdir vs user-global). We detect both and ask the user to pick with
+	// --harness / --global rather than silently guessing.
+	skillDir, src, regHarness, code := resolveRegisterTarget(env, skillName, *harnessName, *globalOnly)
+	if code != ExitOK {
+		return code
 	}
 	metaPath := filepath.Join(skillDir, config.MetaFileName)
 	if src.Kind != "workdir" {
@@ -122,7 +119,14 @@ func runRegister(args []string, env *Env) int {
 	skippedSecrets := make([]string, 0)
 	skippedFields := make([]string, 0)
 
+	// Styler for the human-facing status lines and prompts (these go to
+	// stderr); a separate one drives stdout's final summary + callout.
+	sErr := newStyler(env.Stderr)
+
 	if !*noSecrets {
+		if len(meta.Sidecar.Secrets) > 0 {
+			sErr.heading(env.Stderr, "Secrets")
+		}
 		fromFile, err := loadSecretsFile(*secretsFromPath)
 		if err != nil {
 			fmt.Fprintln(env.Stderr, "omac register:", err)
@@ -161,6 +165,7 @@ func runRegister(args []string, env *Env) int {
 	//     skills, or ~/.config/omac/skill-config.yaml for user-global
 	//     skills (NOT the keychain in either case).
 	if !*noFields && len(meta.Sidecar.Config) > 0 {
+		sErr.heading(env.Stderr, "Config fields")
 		fromFile, err := loadFieldsFile(*fieldsFromPath)
 		if err != nil {
 			fmt.Fprintln(env.Stderr, "omac register:", err)
@@ -232,22 +237,19 @@ func runRegister(args []string, env *Env) int {
 		}
 	}
 
-	// 3. Install-script discovery. We surface the path so users know
-	//    where to look and what to run, but we do NOT print the body
-	//    of the script — the dump was historically useful when most
-	//    skills shipped tiny one-liner scripts; modern skills often
-	//    have hundreds of lines of brew/apt logic, and the noise hurt
-	//    more than the discoverability helped. omac never runs the
-	//    script for you; that's still entirely the user's call.
+	// 3. Install-script discovery. We resolve the path here (so a
+	//    missing-on-disk declaration still fails fast / warns early)
+	//    but defer surfacing it until the very end, where it gets a
+	//    prominent boxed callout — running the install script is the
+	//    most common "what next?" after a register, so it shouldn't be
+	//    buried mid-output. We never print the body of the script, and
+	//    omac never runs it for you; that's entirely the user's call.
 	host := osinfo.Detect()
+	var installScriptAbs string
 	if scriptRel := meta.Sidecar.InstallScriptFor(host); scriptRel != "" {
 		scriptAbs := filepath.Join(skillDir, scriptRel)
 		if _, statErr := os.Stat(scriptAbs); statErr == nil {
-			fmt.Fprintf(env.Stdout,
-				"\n[info] install script for %s: %s\n"+
-					"       omac does not run this; inspect it and run it yourself if needed:\n"+
-					"         bash %s\n",
-				host, scriptAbs, scriptAbs)
+			installScriptAbs = scriptAbs
 		} else if errors.Is(statErr, os.ErrNotExist) {
 			// omac.yaml declares an install script but the file isn't
 			// on disk. Surface this as a hint instead of a hard error
@@ -291,6 +293,7 @@ func runRegister(args []string, env *Env) int {
 		skippedFieldsOut := dedupSorted(skippedFields)
 		reg.Upsert(registry.Entry{
 			Name:                skillName,
+			Harness:             regHarness,
 			SkillDir:            stored,
 			BundleHash:          bundleHash,
 			RegisteredAt:        time.Now().UTC(),
@@ -304,24 +307,42 @@ func runRegister(args []string, env *Env) int {
 		return ExitIOError
 	}
 
+	sOut := newStyler(env.Stdout)
+	okTag := sOut.paint("[ok]", ansiBold, ansiGreen)
 	if global {
-		fmt.Fprintf(env.Stdout, "\n[ok] registered %s (global; available in every workdir)\n", skillName)
+		fmt.Fprintf(env.Stdout, "\n%s registered %s %s\n",
+			okTag, sOut.bold(skillName), sOut.gray("(global; available in every workdir)"))
 		// Ask a running omac serve to re-activate the global layer so the
 		// newly-registered global skill is mounted without a restart.
 		if ok, msg := notifyReloadGlobal(); ok {
-			fmt.Fprintf(env.Stdout, "[ok] %s\n", msg)
+			fmt.Fprintf(env.Stdout, "%s %s\n", okTag, msg)
 		} else if msg != "" && msg != "no running omac serve detected" {
-			fmt.Fprintf(env.Stdout, "[info] %s\n", msg)
+			fmt.Fprintf(env.Stdout, "%s %s\n", sOut.paint("[info]", ansiCyan), msg)
 		}
 	} else {
-		fmt.Fprintf(env.Stdout, "\n[ok] registered %s (workdir=%s)\n", skillName, env.Workdir)
+		fmt.Fprintf(env.Stdout, "\n%s registered %s %s\n",
+			okTag, sOut.bold(skillName), sOut.gray("(workdir="+env.Workdir+")"))
 		// If an omac serve is running, ask it to reload this directory so the
 		// newly-registered skill is picked up without a restart.
 		if ok, msg := notifyReload(env.Workdir); ok {
-			fmt.Fprintf(env.Stdout, "[ok] %s\n", msg)
+			fmt.Fprintf(env.Stdout, "%s %s\n", okTag, msg)
 		} else if msg != "" && msg != "no running omac serve detected" {
-			fmt.Fprintf(env.Stdout, "[info] %s\n", msg)
+			fmt.Fprintf(env.Stdout, "%s %s\n", sOut.paint("[info]", ansiCyan), msg)
 		}
+	}
+
+	// Prominent "what next?" callout for the install script. This is the
+	// single most actionable follow-up after a register, so it gets a
+	// bordered box at the very end where it can't be missed. omac never
+	// runs the script itself.
+	if installScriptAbs != "" {
+		sOut.callout(env.Stdout, ansiYellow,
+			fmt.Sprintf("NEXT STEP — install dependencies (%s)", host),
+			[]string{
+				sOut.dim("omac does not run this for you. Inspect it, then run:"),
+				"",
+				"    " + sOut.paint("bash "+installScriptAbs, ansiBold, ansiGreen),
+			})
 	}
 	return ExitOK
 }
@@ -442,6 +463,7 @@ func dedupSorted(names []string) []string {
 // serve reads with (see serve.go bringUp), or the skill will never see the
 // value. See docs/MULTI_DIR_DESKTOP.md §4.3.
 func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, reprompt bool, prevSkipped map[string]bool, fromFile map[string]string, useDefaults bool) (bool, error) {
+	st := newStyler(env.Stderr)
 	// 1. Already in keychain?
 	if !reprompt {
 		present, err := keychain.HasScoped(scope, skill, spec.Name)
@@ -457,14 +479,14 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 				_ = keychain.SetScopedDefaultMirror(skill, spec.Name, cur)
 				cur.Zero()
 			}
-			fmt.Fprintf(env.Stderr, "  [skip] %s already in keychain\n", spec.Name)
+			st.status(env.Stderr, "[skip]", st.dim(spec.Name+" already in keychain"), ansiYellow)
 			return false, nil
 		}
 		// 1b. Previously skipped on a prior register run? Honor that
 		//     unless --reprompt-secrets is set. This is the fix for
 		//     "register --force re-asks every optional secret".
 		if prevSkipped[spec.Name] && !spec.IsRequired() {
-			fmt.Fprintf(env.Stderr, "  [skip] %s (optional, previously declined)\n", spec.Name)
+			st.status(env.Stderr, "[skip]", st.dim(spec.Name+" (optional, previously declined)"), ansiYellow)
 			return true, nil
 		}
 	}
@@ -481,7 +503,7 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 					return false, fmt.Errorf("keychain: %w", serr)
 				}
 				def.Zero()
-				fmt.Fprintf(env.Stderr, "  stored %s (from remembered default)\n", spec.Name)
+				st.status(env.Stderr, "stored", spec.Name+st.gray(" (from remembered default)"), ansiGreen)
 				return false, nil
 			}
 			def.Zero()
@@ -498,7 +520,7 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 		if err := keychain.SetWithDefault(scope, skill, spec.Name, s); err != nil {
 			return false, fmt.Errorf("keychain: %w", err)
 		}
-		fmt.Fprintf(env.Stderr, "  stored %s (from file)\n", spec.Name)
+		st.status(env.Stderr, "stored", spec.Name+st.gray(" (from file)"), ansiGreen)
 		return false, nil
 	}
 
@@ -512,7 +534,7 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 		if err := keychain.SetWithDefault(scope, skill, spec.Name, s); err != nil {
 			return false, fmt.Errorf("keychain: %w", err)
 		}
-		fmt.Fprintf(env.Stderr, "  stored %s (from OMAC_SECRET_%s)\n", spec.Name, spec.Name)
+		st.status(env.Stderr, "stored", spec.Name+st.gray(fmt.Sprintf(" (from OMAC_SECRET_%s)", spec.Name)), ansiGreen)
 		return false, nil
 	}
 
@@ -529,12 +551,12 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 
 	// 5. Interactive prompt loop.
 	if spec.Description != "" {
-		fmt.Fprintf(env.Stderr, "  %s: %s\n", spec.Name, spec.Description)
+		fmt.Fprintf(env.Stderr, "  %s %s\n", st.bold(spec.Name), st.dim(spec.Description))
 	}
 	attempts := 0
 	for {
 		attempts++
-		prompt := fmt.Sprintf("  enter %s%s: ", spec.Name, defaultHint)
+		prompt := fmt.Sprintf("  %s %s%s ", st.cyan("?"), st.bold(spec.Name), st.gray(defaultHint+":"))
 		value, err := secrets.ReadPassword(prompt)
 		if err != nil {
 			return false, fmt.Errorf("read %s: %w", spec.Name, err)
@@ -550,18 +572,18 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 						return false, fmt.Errorf("keychain: %w", err)
 					}
 					s.Zero()
-					fmt.Fprintf(env.Stderr, "  stored %s (from $%s)\n", spec.Name, spec.DefaultFromEnv)
+					st.status(env.Stderr, "stored", spec.Name+st.gray(fmt.Sprintf(" (from $%s)", spec.DefaultFromEnv)), ansiGreen)
 					return false, nil
 				}
 			}
 			if !spec.IsRequired() {
-				fmt.Fprintf(env.Stderr, "  [skip] %s (optional, not provided)\n", spec.Name)
+				st.status(env.Stderr, "[skip]", st.dim(spec.Name+" (optional, not provided)"), ansiYellow)
 				return true, nil
 			}
 			if attempts >= 3 {
 				return false, fmt.Errorf("refused: required secret %q not supplied", spec.Name)
 			}
-			fmt.Fprintln(env.Stderr, "  [retry] required; please enter a value")
+			st.status(env.Stderr, "[retry]", "required; please enter a value", ansiRed)
 			continue
 		}
 		if err := validatePattern(spec, value.ExposeString()); err != nil {
@@ -569,7 +591,7 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 			if attempts >= 3 {
 				return false, fmt.Errorf("refused: %s does not match pattern after %d attempts", spec.Name, attempts)
 			}
-			fmt.Fprintf(env.Stderr, "  [retry] %s\n", err)
+			st.status(env.Stderr, "[retry]", err.Error(), ansiRed)
 			continue
 		}
 		if err := keychain.SetWithDefault(scope, skill, spec.Name, value); err != nil {
@@ -577,7 +599,7 @@ func handleOneSecret(env *Env, scope, skill string, spec config.SecretSpec, repr
 			return false, fmt.Errorf("keychain: %w", err)
 		}
 		value.Zero()
-		fmt.Fprintf(env.Stderr, "  stored %s\n", spec.Name)
+		st.status(env.Stderr, "stored", spec.Name, ansiGreen)
 		return false, nil
 	}
 }
@@ -608,6 +630,7 @@ func validatePattern(spec config.SecretSpec, v string) error {
 // caller level (we reuse that exit code because the semantics — user
 // explicitly didn't supply a required value — are the same).
 func handleOneField(env *Env, store *skillconfig.Store, skill string, spec config.ConfigSpec, reprompt bool, prevSkipped map[string]bool, fromFile map[string]string, useDefaults bool, defStore *skillconfig.Store) (bool, error) {
+	st := newStyler(env.Stderr)
 	// setField stores the value in the runtime store and, when defaults
 	// are in play, mirrors it into the defaults store too.
 	setField := func(val string) {
@@ -626,7 +649,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 			if defStore != nil {
 				defStore.SetDefault(skill, spec.Name, cur)
 			}
-			fmt.Fprintf(env.Stderr, "  [skip] %s already configured\n", spec.Name)
+			st.status(env.Stderr, "[skip]", st.dim(spec.Name+" already configured"), ansiYellow)
 			return false, nil
 		}
 		// 1b. Previously skipped on a prior register run? Honor that
@@ -635,7 +658,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 		//     field on every run, which the user reasonably treats as
 		//     a regression.
 		if prevSkipped[spec.Name] && !spec.IsRequired() {
-			fmt.Fprintf(env.Stderr, "  [skip] %s (optional, previously declined)\n", spec.Name)
+			st.status(env.Stderr, "[skip]", st.dim(spec.Name+" (optional, previously declined)"), ansiYellow)
 			return true, nil
 		}
 	}
@@ -647,7 +670,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 		if def, ok := defStore.GetDefault(skill, spec.Name); ok {
 			if canon, err := canonicalizeFieldValue(spec, def); err == nil {
 				setField(canon)
-				fmt.Fprintf(env.Stderr, "  set %s = %s (from remembered default)\n", spec.Name, canon)
+				st.setLine(env.Stderr, spec.Name, canon, "(from remembered default)")
 				return false, nil
 			}
 		}
@@ -660,7 +683,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 			return false, err
 		}
 		setField(canon)
-		fmt.Fprintf(env.Stderr, "  set %s = %s (from file)\n", spec.Name, canon)
+		st.setLine(env.Stderr, spec.Name, canon, "(from file)")
 		return false, nil
 	}
 
@@ -673,7 +696,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 			return false, err
 		}
 		setField(canon)
-		fmt.Fprintf(env.Stderr, "  set %s = %s (from $OMAC_CONFIG_%s)\n", spec.Name, canon, spec.Name)
+		st.setLine(env.Stderr, spec.Name, canon, fmt.Sprintf("(from $OMAC_CONFIG_%s)", spec.Name))
 		return false, nil
 	}
 
@@ -690,10 +713,10 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 
 	// 5. Interactive prompt loop.
 	if spec.Description != "" {
-		fmt.Fprintf(env.Stderr, "  %s: %s\n", spec.Name, spec.Description)
+		fmt.Fprintf(env.Stderr, "  %s %s\n", st.bold(spec.Name), st.dim(spec.Description))
 	}
 	if spec.EffectiveType() == config.ConfigFieldEnum {
-		fmt.Fprintf(env.Stderr, "    choices: %s\n", strings.Join(spec.Choices, ", "))
+		fmt.Fprintf(env.Stderr, "    %s %s\n", st.gray("choices:"), st.cyan(strings.Join(spec.Choices, ", ")))
 	}
 
 	reader := bufio.NewReader(env.Stdin)
@@ -704,7 +727,7 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 		if defaultVal != "" {
 			hint = fmt.Sprintf(" [%s, from %s]", defaultVal, defaultSource)
 		}
-		fmt.Fprintf(env.Stderr, "  enter %s%s: ", spec.Name, hint)
+		fmt.Fprintf(env.Stderr, "  %s %s%s ", st.cyan("?"), st.bold(spec.Name), st.gray(hint+":"))
 
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -724,17 +747,17 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 					return false, fmt.Errorf("default for %s rejected: %w", spec.Name, err)
 				}
 				setField(canon)
-				fmt.Fprintf(env.Stderr, "  set %s = %s (default from %s)\n", spec.Name, canon, defaultSource)
+				st.setLine(env.Stderr, spec.Name, canon, fmt.Sprintf("(default from %s)", defaultSource))
 				return false, nil
 			}
 			if !spec.IsRequired() {
-				fmt.Fprintf(env.Stderr, "  [skip] %s (optional, not provided)\n", spec.Name)
+				st.status(env.Stderr, "[skip]", st.dim(spec.Name+" (optional, not provided)"), ansiYellow)
 				return true, nil
 			}
 			if attempts >= 3 {
 				return false, fmt.Errorf("refused: required config field %q not supplied", spec.Name)
 			}
-			fmt.Fprintln(env.Stderr, "  [retry] required; please enter a value")
+			st.status(env.Stderr, "[retry]", "required; please enter a value", ansiRed)
 			continue
 		}
 
@@ -743,11 +766,11 @@ func handleOneField(env *Env, store *skillconfig.Store, skill string, spec confi
 			if attempts >= 3 {
 				return false, fmt.Errorf("refused: %s rejected after %d attempts: %w", spec.Name, attempts, err)
 			}
-			fmt.Fprintf(env.Stderr, "  [retry] %s\n", err)
+			st.status(env.Stderr, "[retry]", err.Error(), ansiRed)
 			continue
 		}
 		setField(canon)
-		fmt.Fprintf(env.Stderr, "  set %s = %s\n", spec.Name, canon)
+		st.setLine(env.Stderr, spec.Name, canon, "")
 		return false, nil
 	}
 }
@@ -864,4 +887,135 @@ func loadSecretsFile(path string) (map[string]string, error) {
 		return nil, fmt.Errorf("read --secrets-from: %w", err)
 	}
 	return out, nil
+}
+
+// resolveRegisterTarget finds the single skill source dir to register,
+// honoring harness scope (--harness) and scope (--global), and detecting
+// ambiguity. On any error it prints a message and returns a non-OK exit code;
+// on success it returns the winning skill dir, its source, the harness name to
+// record on the registry entry ("" for a shared/.agents skill that is not
+// specific to one harness), and ExitOK.
+func resolveRegisterTarget(env *Env, skillName, harnessFlag string, globalOnly bool) (string, skillsource.Source, string, int) {
+	// Gather candidates. If --harness is given, scope strictly to that
+	// harness; otherwise scan every harness so we can detect a name that
+	// exists under more than one harness.
+	var (
+		cands []skillsource.Candidate
+		err   error
+	)
+	if harnessFlag != "" {
+		h, ok := config.LookupHarness(harnessFlag)
+		if !ok {
+			fmt.Fprintln(env.Stderr, "omac register:", config.UnknownHarnessError(harnessFlag))
+			return "", skillsource.Source{}, "", ExitMisuse
+		}
+		cands, err = skillsource.Candidates(env.Workdir, h, skillName)
+	} else {
+		cands, err = skillsource.CandidatesAllHarnesses(env.Workdir, skillName)
+	}
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac register:", err)
+		return "", skillsource.Source{}, "", ExitIOError
+	}
+	if len(cands) == 0 {
+		fmt.Fprintf(env.Stderr, "omac register: %q not found in any in-scope skill source\n", skillName)
+		return "", skillsource.Source{}, "", ExitPrerequisiteMissing
+	}
+
+	// Apply --global scope filter (keep only user-global when asked).
+	if globalOnly {
+		filtered := cands[:0:0]
+		for _, c := range cands {
+			if c.Kind == "user-global" {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			fmt.Fprintf(env.Stderr, "omac register: --global given but %q has no user-global source in scope\n", skillName)
+			return "", skillsource.Source{}, "", ExitPrerequisiteMissing
+		}
+		cands = filtered
+	}
+
+	// Harness-level ambiguity: the name resolves under more than one harness
+	// (excluding the shared layer, which is a single physical dir).
+	if harnessFlag == "" && distinctHarnesses(cands) > 1 {
+		printRegisterAmbiguity(env, skillName, cands, true)
+		return "", skillsource.Source{}, "", ExitMisuse
+	}
+
+	// Down to a single harness scope. If still more than one candidate, it's
+	// a scope ambiguity (workdir vs user-global). We surface it rather than
+	// silently choosing, unless --global already narrowed it.
+	if len(cands) > 1 {
+		printRegisterAmbiguity(env, skillName, cands, false)
+		return "", skillsource.Source{}, "", ExitMisuse
+	}
+
+	c := cands[0]
+	// The harness recorded on the registry entry: empty for a shared/.agents
+	// skill (it belongs to no single harness), else the candidate's harness.
+	regHarness := c.Harness
+	if regHarness == skillsource.SharedHarnessLabel {
+		regHarness = ""
+	}
+	return c.Dir, skillsource.Source{Root: filepath.Dir(c.Dir), Kind: c.Kind}, regHarness, ExitOK
+}
+
+// distinctHarnesses counts how many distinct harness owners appear in the
+// candidate set. The shared label collapses to a single non-harness bucket so
+// a purely shared skill counts as one (not ambiguous).
+func distinctHarnesses(cands []skillsource.Candidate) int {
+	seen := map[string]struct{}{}
+	for _, c := range cands {
+		seen[c.Harness] = struct{}{}
+	}
+	return len(seen)
+}
+
+// printRegisterAmbiguity renders an aligned table of candidates and the exact
+// flag(s) to disambiguate. harnessAmbiguous selects the hint (--harness vs
+// --global).
+func printRegisterAmbiguity(env *Env, skillName string, cands []skillsource.Candidate, harnessAmbiguous bool) {
+	s := newStyler(env.Stderr)
+	fmt.Fprintf(env.Stderr, "\n%s\n", s.bold(fmt.Sprintf("Multiple skills named %q found:", skillName)))
+
+	// Compute column widths.
+	hW, scW := len("HARNESS"), len("SCOPE")
+	for _, c := range cands {
+		if len(c.Harness) > hW {
+			hW = len(c.Harness)
+		}
+		scope := scopeLabel(c.Kind)
+		if len(scope) > scW {
+			scW = len(scope)
+		}
+	}
+	fmt.Fprintf(env.Stderr, "  %-*s  %-*s  %s\n", hW, "HARNESS", scW, "SCOPE", "PATH")
+	for _, c := range cands {
+		fmt.Fprintf(env.Stderr, "  %-*s  %-*s  %s\n", hW, c.Harness, scW, scopeLabel(c.Kind), c.Dir)
+	}
+
+	fmt.Fprintln(env.Stderr)
+	if harnessAmbiguous {
+		// Suggest a concrete --harness for the first non-shared candidate.
+		example := skillName
+		for _, c := range cands {
+			if c.Harness != skillsource.SharedHarnessLabel {
+				example = fmt.Sprintf("%s --harness %s", skillName, c.Harness)
+				break
+			}
+		}
+		fmt.Fprintf(env.Stderr, "Pick a harness:  %s\n", s.cyan("omac register "+example))
+	} else {
+		fmt.Fprintf(env.Stderr, "Pick the user-global one with %s, or omit it for the workdir-local one:\n", s.bold("--global"))
+		fmt.Fprintf(env.Stderr, "  %s\n", s.cyan("omac register "+skillName+" --global"))
+	}
+}
+
+func scopeLabel(kind string) string {
+	if kind == "user-global" {
+		return "global"
+	}
+	return "workdir"
 }

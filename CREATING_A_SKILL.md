@@ -13,6 +13,57 @@ an `omac.yaml` (omac's runtime contract describing the sidecar process,
 secrets, mounts, and health probe). The two files cover non-overlapping
 concerns; see §3 below.
 
+> **Skills are harness-agnostic.** A skill targets only the omac contract —
+> the `OMAC_*` environment variables and the facade's REST routes — and MUST
+> NOT assume a particular inner harness (OpenCode, Claude Code, …), its plugin
+> API, or any harness-specific file path. The same skill, unmodified, runs
+> under every harness. omac selects the harness with a positional token
+> (`omac start opencode` / `omac start claude`); which one is active is
+> invisible to your skill. See [§0 Running under a harness](#0-running-under-a-harness).
+
+---
+
+## 0. Running under a harness
+
+You do not write anything harness-specific. omac launches an inner agentic
+coder inside the sandbox and exposes your skill to it identically regardless of
+which harness is chosen:
+
+- **Reaching your sidecar.** Inside the sandbox the agent reads
+  `OMAC_<MOUNT>_BASE` (a `http://127.0.0.1:<port>/<mount>` URL) — or
+  `OMAC_<MOUNT>_SOCKET_BASE` for the `http+unix://` form — and appends your
+  documented path. These names are the same under OpenCode and Claude Code.
+  Global skills also get `OMAC_G_<MOUNT>_BASE`.
+- **Discovery.** Each harness ships a *bridge* that surfaces a skills manifest
+  to the agent listing every ready skill's `base` URL. Under **OpenCode** this
+  is the plugin in `.opencode/plugins/`; under **Claude Code** it is the
+  `SessionStart` hook in `.claude/`. Both produce the same manifest content
+  from omac's control plane — you do not interact with either directly.
+- **Where skills live (harness-scoped).** Each harness reads `SKILL.md` from
+  its own skills dir, and omac scopes discovery to match:
+  - OpenCode → `.opencode/skills` (+ `~/.config/opencode/skills`)
+  - Claude Code → `.claude/skills` (+ `~/.claude/skills`)
+  - **Shared** → `.agents/skills` (+ `~/.config/agents/skills`), in scope for
+    every harness.
+
+  The active harness scans **its own dir + `.agents/skills`** and **never** the
+  other harness's dir. Put a skill under `.agents/skills` to make it usable by
+  every harness from one copy; put it under a harness's own dir to scope it to
+  that harness.
+- **Install location.** The marketplace `/install` defaults to the **active
+  harness's** skills dir (it reads `OMAC_HARNESS_SKILLS_DIR`, which omac
+  injects). Pass `target_path` to override — e.g. `.agents/skills` to install a
+  shared skill. Never hard-code a single harness's directory in skill logic.
+- **Registration.** A skill name can be registered once per harness. If a name
+  is ambiguous (present under multiple harnesses, or both workdir and global),
+  `omac register` stops and asks you to pick with `--harness` / `--global`.
+
+If your skill works under one harness it works under all of them — that is the
+contract. Test it the same way (the `echo-rest` reference skill is the smoke
+test) and it is automatically portable.
+
+---
+
 If you have not already, read:
 
 - [`README.md`](./README.md) — high-level workflow and CLI reference.

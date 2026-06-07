@@ -6,6 +6,56 @@ Related: `oh-my-agentic-coder.md` (master design), `internal/cli/start.go`,
 `internal/facade/facade.go`, `internal/supervisor/supervisor.go`,
 `internal/skillsource/skillsource.go`.
 
+> **Harness note.** This document was written for the OpenCode harness, but the
+> control plane, namespacing, manifest, and isolation design are
+> harness-agnostic. The harness is selected by a positional token —
+> `omac serve opencode` / `omac serve claude` (default: `opencode`). Each
+> harness supplies a **bridge** that calls the same control-plane endpoints
+> described here. See [§0 Harness bridges](#0-harness-bridges).
+
+---
+
+## 0. Harness bridges
+
+The "OpenCode-side" responsibilities in this spec (activate on directory open,
+surface the manifest to the model, inject per-session skill env, deactivate on
+session end) form a single, harness-independent **bridge interface**. omac
+ships one bridge per supported harness; both speak only to `OMAC_CONTROL_BASE`
+and the `/__omac__/*` endpoints.
+
+| Harness     | Bridge                         | Activation trigger              | Manifest delivery                         | Per-session env                              |
+| ----------- | ------------------------------ | ------------------------------- | ----------------------------------------- | -------------------------------------------- |
+| OpenCode    | `.opencode/plugins/omac-multidir.ts` | plugin construction + `session.*` events | `experimental.chat.system.transform`      | `shell.env` → `OMAC_D_*` per session (§4.1)  |
+| Claude Code | `.claude/` (`settings.json` + `hooks/omac-bridge.sh`) | `SessionStart` hook              | `SessionStart` hook `additionalContext`   | process-level flat aliases (`OMAC_<MOUNT>_BASE`) — see below |
+
+**OpenCode** has a true per-session env hook, so it can inject distinct
+`OMAC_D_<token>_<MOUNT>_BASE` for every session and supports the full
+multi-directory isolation described in §8.
+
+**Claude Code** has no per-shell env hook equivalent. Its bridge therefore
+relies on the §5.5 single-directory flat aliases that omac already exports into
+the inner process environment (`OMAC_<MOUNT>_BASE`, `OMAC_G_<MOUNT>_BASE`),
+which Claude Code inherits. This is sufficient for the common
+one-directory-per-process case and degrades gracefully when several directories
+are active (the manifest still lists every skill's absolute `base` URL, which
+the agent can call directly). Claude Code also has no `opencode serve`-style
+daemon convention, so under `omac serve claude` the inner command runs as-is
+(no subcommand is injected); `omac start claude` is the primary supported mode.
+
+Adding a third harness is: register a descriptor in
+`internal/config/harness.go` (name, aliases, inner command, server-launch
+convention, bridge directory) and ship a bridge that implements this interface.
+
+**Harness-scoped discovery.** Discovery (workdir and global) is scoped to the
+active harness: it scans the harness's own skills dir (`.opencode/skills` /
+`.claude/skills`) plus the shared `.agents/skills`, and never the other
+harness's dir. In serve mode this scoping applies to per-directory activation
+*and* to the cold-start global skills (a global skill registered under another
+harness's dir is skipped). A skill name may be registered once per harness; the
+manifest a bridge receives therefore only lists skills the active harness can
+load. The marketplace `/install` target defaults to the active harness's dir
+via the injected `OMAC_HARNESS_SKILLS_DIR`.
+
 ---
 
 ## 1. Problem

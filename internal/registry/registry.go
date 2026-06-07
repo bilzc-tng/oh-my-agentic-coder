@@ -33,7 +33,14 @@ type Registry struct {
 // It supersedes the older meta_hash that only covered omac.yaml,
 // so an install-script edit now invalidates the registration too.
 type Entry struct {
-	Name                string    `json:"name"`
+	Name string `json:"name"`
+	// Harness scopes this registration to one inner harness (e.g.
+	// "opencode", "claude-code"). The same skill name may be registered once
+	// per harness, each pointing at that harness's own skill dir, because a
+	// skill discovered for one harness is invisible to another. Empty means a
+	// legacy/unscoped entry that matches any harness (back-compat with
+	// registries written before harness scoping).
+	Harness             string    `json:"harness,omitempty"`
 	SkillDir            string    `json:"skill_dir"`
 	BundleHash          string    `json:"bundle_hash"`
 	RegisteredAt        time.Time `json:"registered_at"`
@@ -195,7 +202,10 @@ func saveTo(dir, finalPath string, r *Registry) error {
 	return nil
 }
 
-// Find returns the entry for name (or nil) and its index (or -1).
+// Find returns the entry for name (or nil) and its index (or -1). It matches
+// by name only, returning the first entry — kept for back-compat with callers
+// that don't care about harness scoping. Prefer FindForHarness when a harness
+// context exists.
 func (r *Registry) Find(name string) (*Entry, int) {
 	for i := range r.Registered {
 		if r.Registered[i].Name == name {
@@ -205,18 +215,77 @@ func (r *Registry) Find(name string) (*Entry, int) {
 	return nil, -1
 }
 
-// Upsert inserts or updates an entry.
+// FindForHarness returns the entry for (name, harness) and its index. An entry
+// with an empty Harness is treated as a legacy/unscoped match for any harness.
+// An exact harness match is preferred over a legacy match.
+func (r *Registry) FindForHarness(name, harness string) (*Entry, int) {
+	legacyIdx := -1
+	for i := range r.Registered {
+		if r.Registered[i].Name != name {
+			continue
+		}
+		if r.Registered[i].Harness == harness {
+			return &r.Registered[i], i
+		}
+		if r.Registered[i].Harness == "" && legacyIdx < 0 {
+			legacyIdx = i
+		}
+	}
+	if legacyIdx >= 0 {
+		return &r.Registered[legacyIdx], legacyIdx
+	}
+	return nil, -1
+}
+
+// Upsert inserts or updates an entry, keyed by (Name, Harness). Two entries
+// with the same name but different harnesses coexist. When e.Harness is empty
+// (legacy), it keys by name only for back-compat.
 func (r *Registry) Upsert(e Entry) {
-	if _, idx := r.Find(e.Name); idx >= 0 {
+	idx := -1
+	if e.Harness == "" {
+		_, idx = r.Find(e.Name)
+	} else {
+		_, idx = r.findExact(e.Name, e.Harness)
+		if idx < 0 {
+			// Upgrade a pre-existing legacy (unscoped) entry of the same name
+			// to this harness, rather than leaving a duplicate behind.
+			if _, lidx := r.findExact(e.Name, ""); lidx >= 0 {
+				idx = lidx
+			}
+		}
+	}
+	if idx >= 0 {
 		r.Registered[idx] = e
 		return
 	}
 	r.Registered = append(r.Registered, e)
 }
 
-// Remove deletes an entry by name. Returns true if something was removed.
+// findExact matches by both name and harness exactly (no legacy fallback).
+func (r *Registry) findExact(name, harness string) (*Entry, int) {
+	for i := range r.Registered {
+		if r.Registered[i].Name == name && r.Registered[i].Harness == harness {
+			return &r.Registered[i], i
+		}
+	}
+	return nil, -1
+}
+
+// Remove deletes the first entry matching name (any harness). Returns true if
+// something was removed.
 func (r *Registry) Remove(name string) bool {
 	_, idx := r.Find(name)
+	if idx < 0 {
+		return false
+	}
+	r.Registered = append(r.Registered[:idx], r.Registered[idx+1:]...)
+	return true
+}
+
+// RemoveForHarness deletes the entry matching (name, harness), preferring an
+// exact harness match, else a legacy unscoped one. Returns true if removed.
+func (r *Registry) RemoveForHarness(name, harness string) bool {
+	_, idx := r.FindForHarness(name, harness)
 	if idx < 0 {
 		return false
 	}

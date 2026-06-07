@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/facade"
 )
 
@@ -46,6 +47,7 @@ func newServeServerForTest(t *testing.T) *serveServer {
 
 	return &serveServer{
 		env:        makeEnv(t.TempDir()),
+		harness:    config.DefaultHarness(),
 		facade:     f,
 		sup:        nil, // not used for pending-credentials path
 		ctx:        t.Context(),
@@ -230,37 +232,6 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-func TestEnsureServeSubcommand(t *testing.T) {
-	cases := []struct {
-		name     string
-		inner    []string
-		trailing []string
-		want     []string
-	}{
-		{"bare opencode", []string{"opencode"}, nil, []string{"opencode", "serve"}},
-		{"opencode with flags only", []string{"opencode"}, []string{"--port", "0"}, []string{"opencode", "serve"}},
-		{"opencode already serve", []string{"opencode", "serve"}, nil, []string{"opencode", "serve"}},
-		{"opencode explicit other subcommand", []string{"opencode"}, []string{"run", "x"}, []string{"opencode"}},
-		{"absolute path opencode", []string{"/usr/bin/opencode"}, nil, []string{"/usr/bin/opencode", "serve"}},
-		{"non-opencode untouched", []string{"bash"}, nil, []string{"bash"}},
-		{"inner tail has subcommand", []string{"opencode", "tui"}, nil, []string{"opencode", "tui"}},
-		{"inner tail flag only -> insert", []string{"opencode", "--pure"}, nil, []string{"opencode", "serve", "--pure"}},
-	}
-	for _, c := range cases {
-		got := ensureServeSubcommand(append([]string(nil), c.inner...), c.trailing)
-		if len(got) != len(c.want) {
-			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
-			continue
-		}
-		for i := range got {
-			if got[i] != c.want[i] {
-				t.Errorf("%s: got %v, want %v", c.name, got, c.want)
-				break
-			}
-		}
-	}
-}
-
 func TestReloadGlobalsEmptyIsNoop(t *testing.T) {
 	s := newServeServerForTest(t)
 	// No global skills registered (isolated HOME/XDG), so reloadGlobals
@@ -382,5 +353,21 @@ func TestRediscoverPicksUpNewSkill(t *testing.T) {
 	// Token is stable across rediscover (same activation).
 	if m1["dir_token"] != m2["dir_token"] {
 		t.Errorf("token changed on rediscover: %v -> %v", m1["dir_token"], m2["dir_token"])
+	}
+}
+
+func TestBaseEnvInjectsNonoNoSaveByDefault(t *testing.T) {
+	s := newServeServerForTest(t)
+	s.updateSandbox = false
+	if got := s.baseEnv()["NONO_NO_SAVE"]; got != "1" {
+		t.Errorf("default baseEnv NONO_NO_SAVE = %q, want \"1\"", got)
+	}
+}
+
+func TestBaseEnvOmitsNonoNoSaveWhenUpdateSandbox(t *testing.T) {
+	s := newServeServerForTest(t)
+	s.updateSandbox = true
+	if _, present := s.baseEnv()["NONO_NO_SAVE"]; present {
+		t.Errorf("with --update-sandbox, NONO_NO_SAVE must not be set")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
 	"github.com/tngtech/oh-my-agentic-coder/internal/skillconfig"
 )
@@ -111,7 +112,7 @@ func TestStartSeesGloballyRegisteredSkill(t *testing.T) {
 	// Merge the empty workdir registry with the global one, the way
 	// runStart does, then verify nothing is reported unregistered.
 	merged := mergeRegistries(greg, &registry.Registry{})
-	unreg, err := findUnregisteredSkills(wd, merged)
+	unreg, err := findUnregisteredSkills(wd, config.DefaultHarness(), merged)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}

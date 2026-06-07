@@ -180,14 +180,19 @@ export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }
     lines.push("")
     lines.push(`This workspace's project directory is: \`${m.dir}\``)
     if (hasGlobal) {
+      // The active harness's own skills dir (omac injects this). OpenCode →
+      // .opencode/skills. Installs must land where this harness's loader reads
+      // SKILL.md, so the manifest tells the agent the harness-correct path.
+      const skillsDir = process.env.OMAC_HARNESS_SKILLS_DIR || ".opencode/skills"
       lines.push("")
       lines.push(
         "IMPORTANT: **global** skills are shared by every workspace and run as a " +
           "single process; they do NOT know which project you are in. When a global " +
           "skill writes into the project (e.g. the marketplace installing a skill), " +
           "you MUST pass this workspace's project directory explicitly — for the " +
-          `marketplace use \`"target_path": "${m.dir}/.opencode/skills"\` in the ` +
-          "/install request body. Otherwise it installs into the wrong directory.",
+          `marketplace use \`"target_path": "${m.dir}/${skillsDir}"\` in the /install ` +
+          "request body (this is the active harness's skills directory). Otherwise it " +
+          "installs into the wrong directory.",
       )
     }
     lines.push("")

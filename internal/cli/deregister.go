@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/keychain"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
 )
@@ -15,9 +16,10 @@ func runDeregister(args []string, env *Env) int {
 		purge         = fs.Bool("purge-secrets", false, "Also delete every omac/<skill>/* entry from the keychain.")
 		purgeFields   = fs.Bool("purge-fields", false, "Also delete this skill's entries from .opencode/skill-config.yaml.")
 		purgeDefaults = fs.Bool("purge-defaults", false, "Also delete this skill's remembered global defaults (secrets + config).")
+		harnessName   = fs.String("harness", "", "Deregister only the entry for this harness (opencode|claude). Default: the first matching entry. Use when a skill name is registered under multiple harnesses.")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: omac deregister <skill> [--purge-secrets] [--purge-fields] [--purge-defaults]")
+		fmt.Fprintln(env.Stderr, "Usage: omac deregister <skill> [--harness <name>] [--purge-secrets] [--purge-fields] [--purge-defaults]")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(reorderFlagsFirst(args)); err != nil {
@@ -28,6 +30,18 @@ func runDeregister(args []string, env *Env) int {
 		return ExitMisuse
 	}
 	name := fs.Arg(0)
+
+	// Resolve the optional harness selector. Empty means "first match,
+	// any harness" (legacy behavior).
+	harnessKey := ""
+	if *harnessName != "" {
+		h, ok := config.LookupHarness(*harnessName)
+		if !ok {
+			fmt.Fprintln(env.Stderr, "omac deregister:", config.UnknownHarnessError(*harnessName))
+			return ExitMisuse
+		}
+		harnessKey = h.Name
+	}
 
 	var declared []string
 	var existed bool
@@ -41,9 +55,9 @@ func runDeregister(args []string, env *Env) int {
 	// layer so `omac deregister <name>` works from anywhere for a
 	// globally-registered skill.
 	if gReg, err := registry.LoadGlobal(); err == nil {
-		if e, _ := gReg.Find(name); e != nil {
+		if e, _ := gReg.FindForHarness(name, harnessKey); e != nil {
 			if wReg, err := registry.Load(env.Workdir); err == nil {
-				if e, _ := wReg.Find(name); e == nil {
+				if e, _ := wReg.FindForHarness(name, harnessKey); e == nil {
 					global = true
 				}
 			}
@@ -55,10 +69,14 @@ func runDeregister(args []string, env *Env) int {
 		if err != nil {
 			return err
 		}
-		if e, _ := reg.Find(name); e != nil {
+		if e, _ := reg.FindForHarness(name, harnessKey); e != nil {
 			declared = e.DeclaredSecretNames
 		}
-		existed = reg.Remove(name)
+		if harnessKey != "" {
+			existed = reg.RemoveForHarness(name, harnessKey)
+		} else {
+			existed = reg.Remove(name)
+		}
 		if err := saveRegistry(env.Workdir, global, reg); err != nil {
 			return err
 		}

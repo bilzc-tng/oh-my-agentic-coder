@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
 )
 
@@ -143,7 +144,7 @@ func TestFindUnregisteredSkills_FindsNew(t *testing.T) {
 	reg := &registry.Registry{Registered: []registry.Entry{
 		{Name: "alpha"}, // bravo and charlie are unregistered
 	}}
-	got, err := findUnregisteredSkills(dir, reg)
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -160,7 +161,7 @@ func TestFindUnregisteredSkills_AllRegistered(t *testing.T) {
 		{Name: "alpha"},
 		{Name: "bravo"},
 	}}
-	got, err := findUnregisteredSkills(dir, reg)
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -179,7 +180,7 @@ func TestFindUnregisteredSkills_SkipsDirsWithoutMetaYaml(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := &registry.Registry{Registered: []registry.Entry{{Name: "alpha"}}}
-	got, err := findUnregisteredSkills(dir, reg)
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestFindUnregisteredSkills_NoSkillsDir(t *testing.T) {
 	// been installed.
 	isolateHome(t)
 	dir := t.TempDir()
-	got, err := findUnregisteredSkills(dir, &registry.Registry{})
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), &registry.Registry{})
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -222,7 +223,7 @@ func TestFindUnregisteredSkills_SeesUserGlobal(t *testing.T) {
 	}
 
 	reg := &registry.Registry{Registered: []registry.Entry{{Name: "alpha"}}}
-	got, err := findUnregisteredSkills(wd, reg)
+	got, err := findUnregisteredSkills(wd, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -253,7 +254,7 @@ func TestFindUnregisteredSkills_WorkdirHidesUserGlobalDup(t *testing.T) {
 	}
 
 	reg := &registry.Registry{Registered: []registry.Entry{{Name: "shared"}}}
-	got, err := findUnregisteredSkills(wd, reg)
+	got, err := findUnregisteredSkills(wd, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}

@@ -120,8 +120,8 @@ func commands() map[string]Command {
 		"list":       {Name: "list", Short: "List registered skills.", Run: runList},
 		"secrets":    {Name: "secrets", Short: "Manage skill secrets in the OS keychain.", Run: runSecrets},
 		"config":     {Name: "config", Short: "Show resolved config + secret fingerprints for a skill.", Run: runConfig},
-		"start":      {Name: "start", Short: "Start sidecars + facade + sandbox.", Run: runStart},
-		"serve":      {Name: "serve", Short: "Long-lived multi-directory server (OpenCode Desktop).", Run: runServe},
+		"start":      {Name: "start", Short: "Start sidecars + facade + sandbox. Optional [harness]: opencode|claude.", Run: runStart},
+		"serve":      {Name: "serve", Short: "Long-lived multi-directory server. Optional [harness]: opencode|claude.", Run: runServe},
 		"doctor":     {Name: "doctor", Short: "Run sanity checks.", Run: runDoctor},
 		"version":    {Name: "version", Short: "Print version.", Run: runVersion},
 	}
@@ -144,10 +144,15 @@ Subcommands:
   list         List registered skills.
   secrets      Manage skill secrets in the OS keychain.
   config       Show resolved config + secret fingerprints for a skill.
-  start        Start sidecars + facade + sandbox.
-  serve        Long-lived multi-directory server (OpenCode Desktop).
+  start        Start sidecars + facade + sandbox.       [harness]: opencode|claude
+  serve        Long-lived multi-directory server.        [harness]: opencode|claude
   doctor       Run sanity checks.
   version      Print version.
+
+Harness selection (start/serve):
+  omac start            # default harness (opencode)
+  omac start opencode   # OpenCode
+  omac start claude     # Claude Code
 
 Run 'omac <subcommand> --help' for subcommand-specific flags.`)
 }
