@@ -198,9 +198,13 @@ export const OmacMultiDirPlugin: Plugin = async ({ client, directory, worktree }
       } else if (sk.state === "pending-credentials") {
         anyUnavailable = true
         const miss = (sk.missing ?? []).join(", ")
+        const cmds = (sk.missing ?? []).map((n) => `omac secrets set ${sk.name} ${n}`).join(" ; ")
         lines.push(
           `- **${sk.name}** (${sk.scope}) — UNAVAILABLE (missing credentials: ${miss}). ` +
-            `Run \`omac secrets set ${sk.name} <NAME>\`, then reload (see below).`,
+            `**You (the user) must run this in your own terminal** — it prompts for a ` +
+            `masked value the agent cannot type:\n  \`${cmds}\`\n  ` +
+            `That command auto-reloads the running omac serve, so the skill becomes ` +
+            `available right after; no restart and no manual reload needed.`,
         )
       } else if (sk.state === "broken") {
         anyUnavailable = true
