@@ -849,10 +849,16 @@ The launcher config shipped with `omac` (see `internal/config/launcher.go`) prov
 
 ### 14.4 CLI overrides
 
+- **Inner harness (positional):** an optional first token after `start`/`serve`
+  selects the harness — `omac start opencode` / `omac start claude` (default:
+  `opencode`). It sets the default `inner_cmd` and the harness's server-launch
+  and bridge conventions. Implemented by the harness registry in
+  `internal/config/harness.go`.
 - `--sandbox <name>` selects `sandbox.profiles.<name>`.
-- `--inner <cmd>` replaces `inner_cmd[0]` (keeps remaining inner args from CLI positionals).
+- `--inner <cmd>` replaces `inner_cmd[0]` (keeps remaining inner args from CLI positionals). It overrides the harness default executable.
 - Positional arguments after `--` are appended to `inner_cmd` as `inner_args`.
-- Example: `omac start --sandbox nono --inner claude-code -- --model opus` runs Claude Code inside Nono with `--model opus`.
+- Example: `omac start claude --sandbox nono -- --model opus` runs Claude Code inside Nono with `--model opus`.
+- Equivalent low-level form: `omac start --sandbox nono --inner claude -- --model opus`.
 
 ---
 

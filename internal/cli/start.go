@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,7 +37,9 @@ func runStart(args []string, env *Env) int {
 		verbose            = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: omac start [flags] [-- inner args...]")
+		fmt.Fprintln(env.Stderr, "Usage: omac start [harness] [flags] [-- inner args...]")
+		fmt.Fprintf(env.Stderr, "\nharness: one of %s (default: %s)\n\n",
+			strings.Join(config.HarnessNames(), ", "), config.DefaultHarness().Name)
 		fs.PrintDefaults()
 	}
 	// Preserve everything after "--" verbatim as inner args.
@@ -52,6 +55,14 @@ func runStart(args []string, env *Env) int {
 		} else {
 			ourArgs = append(ourArgs, a)
 		}
+	}
+	// Consume the optional leading positional harness token (e.g.
+	// `omac start claude`) before flag parsing. The remainder is parsed as
+	// flags (+ any non-flag positionals, which become inner args).
+	harness, ourArgs, err := splitHarnessToken(ourArgs)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start:", err)
+		return ExitMisuse
 	}
 	if err := fs.Parse(reorderFlagsFirst(ourArgs)); err != nil {
 		return ExitMisuse
@@ -89,9 +100,22 @@ func runStart(args []string, env *Env) int {
 	//
 	// An empty registry is NOT in itself an error: omac still works as
 	// a thin sandbox launcher even before any skills are registered.
-	reg, err := registry.Load(env.Workdir)
+	//
+	// Registrations live in two layers: the workdir registry
+	// (.opencode/sidecar.json) and the user-global registry
+	// (~/.config/omac/sidecar.json). User-global skills register once,
+	// globally; workdir-local skills register per-workdir. We load both
+	// and merge them with the workdir layer winning on name collision
+	// (same precedence as skillsource). Auto-deregister still operates
+	// on the workdir layer only — see autoDeregisterMissing.
+	workdirReg, err := registry.Load(env.Workdir)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: registry:", err)
+		return ExitIOError
+	}
+	globalReg, err := registry.LoadGlobal()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start: global registry:", err)
 		return ExitIOError
 	}
 
@@ -102,17 +126,36 @@ func runStart(args []string, env *Env) int {
 	//     intentionally KEPT so an accidental `rm -rf` on the skills
 	//     dir doesn't lose values; the hint tells the user how to
 	//     purge them later.
-	pruned, err := autoDeregisterMissing(env, reg)
+	pruned, err := autoDeregisterMissing(env, workdirReg, false)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: auto-deregister:", err)
 		return ExitIOError
 	}
-	for _, p := range pruned {
+	globalPruned, err := autoDeregisterMissing(env, globalReg, true)
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start: auto-deregister (global):", err)
+		return ExitIOError
+	}
+	for _, p := range append(pruned, globalPruned...) {
 		fmt.Fprintf(env.Stderr,
 			"[info] %s: skill directory missing on disk; auto-deregistered. "+
 				"Stored secrets and config remain. To purge: omac deregister --purge-secrets --purge-fields %s\n",
 			p, p)
 	}
+
+	// Harness scoping: drop registry entries whose skill dir belongs to
+	// another harness (e.g. a global skill under ~/.config/opencode/skills
+	// while running `omac start claude`). The active harness cannot load
+	// them, so omac must not mount or require them. Entries under the active
+	// harness's own dir or the shared .agents dir, or under no recognizable
+	// skills base, are kept.
+	workdirReg = filterRegistryByHarness(workdirReg, env.Workdir, harness)
+	globalReg = filterRegistryByHarness(globalReg, env.Workdir, harness)
+
+	// Merge the two layers into the working registry used by the rest
+	// of start. Workdir entries win over global entries with the same
+	// name.
+	reg := mergeRegistries(globalReg, workdirReg)
 
 	// 2b. Refuse if any unregistered skill exists under any of the
 	//     skill source roots (workdir-local .agents/skills and
@@ -121,7 +164,7 @@ func runStart(args []string, env *Env) int {
 	//     "Skill" here means a directory with a omac.yaml. The user
 	//     must explicitly register each one (so registration prompts,
 	//     keychain seeding, etc. don't get silently skipped).
-	unregistered, err := findUnregisteredSkills(env.Workdir, reg)
+	unregistered, err := findUnregisteredSkills(env.Workdir, harness, reg)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: scan skills:", err)
 		return ExitIOError
@@ -171,11 +214,19 @@ func runStart(args []string, env *Env) int {
 		}
 	}()
 
-	configStore, err := skillconfig.Load(env.Workdir)
+	workdirCfg, err := skillconfig.Load(env.Workdir)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: skill-config:", err)
 		return ExitIOError
 	}
+	globalCfg, err := skillconfig.LoadGlobal()
+	if err != nil {
+		fmt.Fprintln(env.Stderr, "omac start: global skill-config:", err)
+		return ExitIOError
+	}
+	// Merge config the same way as the registry: workdir values
+	// override global values per (skill, field).
+	configStore := mergeConfig(globalCfg, workdirCfg)
 
 	// Per-class problem accumulators. Each maps a hint template to
 	// the affected skill names so we can render "do X for these N
@@ -230,10 +281,14 @@ func runStart(args []string, env *Env) int {
 			}
 		}
 
-		// Secrets.
+		// Secrets. Read with the workdir-scoped key first, falling back to
+		// the unscoped key — so secrets stored by a serve-aware register
+		// (scoped per workdir) and legacy/global secrets (unscoped) both
+		// resolve. See docs/MULTI_DIR_DESKTOP.md §4.3.
+		secScope := keychain.WorkdirID(env.Workdir)
 		secMap := map[string]secrets.Secret{}
 		for _, spec := range m.Sidecar.Secrets {
-			val, err := keychain.Get(e.Name, spec.Name)
+			val, err := keychain.GetWithFallback(secScope, e.Name, spec.Name)
 			if err != nil {
 				if errors.Is(err, keychain.ErrNotFound) {
 					if spec.IsRequired() {
@@ -357,15 +412,16 @@ func runStart(args []string, env *Env) int {
 			health = *s.meta.Sidecar.Health
 		}
 		specs = append(specs, supervisor.SidecarSpec{
-			Name:           s.entry.Name,
-			SkillDir:       s.abs,
-			Command:        s.meta.Sidecar.Command,
-			EnvPassthrough: s.meta.Sidecar.EnvPassthrough,
-			Secrets:        s.secrets,
-			Config:         s.config,
-			Health:         health.Defaults(),
-			LogPath:        filepath.Join(rtDir, "logs", s.entry.Name+".log"),
-			Workdir:        env.Workdir,
+			Name:             s.entry.Name,
+			SkillDir:         s.abs,
+			Command:          s.meta.Sidecar.Command,
+			EnvPassthrough:   s.meta.Sidecar.EnvPassthrough,
+			Secrets:          s.secrets,
+			Config:           s.config,
+			Health:           health.Defaults(),
+			LogPath:          filepath.Join(rtDir, "logs", s.entry.Name+".log"),
+			Workdir:          env.Workdir,
+			HarnessSkillsDir: harness.WorkdirSkillsDir(),
 		})
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -393,6 +449,7 @@ func runStart(args []string, env *Env) int {
 			MaxBodyBytes: maxBody,
 			IdleTimeout:  idle,
 			Skill:        r.Name,
+			SkillDir:     armed[i].abs,
 		})
 		mounts = append(mounts, mount)
 	}
@@ -422,15 +479,29 @@ func runStart(args []string, env *Env) int {
 			socketPath, tcpPort, len(routes))
 	}
 
-	// 8. Build sandbox argv and exec.
-	inner := prof.InnerCmd
-	if *innerCmdOverride != "" {
-		if len(inner) == 0 {
-			inner = []string{*innerCmdOverride}
-		} else {
-			inner = append([]string{*innerCmdOverride}, inner[1:]...)
-		}
+	// Live-reload control plane: lets `omac register` from an outside
+	// terminal mount a new skill onto this running session without a
+	// restart (mirrors serve). Non-fatal if it can't bind.
+	reloader := &startReloader{
+		env: env, facade: f, sup: sup, ctx: ctx,
+		rtDir: rtDir, socket: socketPath, tcpPort: tcpPort, verbose: *verbose,
+		mounted: map[string]string{},
 	}
+	for i, a := range armed {
+		reloader.markMounted(a.entry.Name, a.meta.Sidecar.MountOrDefault(running[i].Name))
+	}
+	controlURL, closeControl, controlOK := startControlPlane(reloader)
+	defer closeControl()
+	if controlOK && *verbose {
+		fmt.Fprintf(env.Stderr, "[verbose] control plane: %s\n", controlURL)
+	}
+
+	// 8. Build sandbox argv and exec.
+	//
+	// Resolve the inner command for the selected harness: an explicit
+	// --inner override wins, else the profile's inner_cmd, else the
+	// harness's default InnerCmd (config.Harness.ResolveInnerCmd).
+	inner := harness.ResolveInnerCmd(prof.InnerCmd, *innerCmdOverride)
 	if len(innerArgs) > 0 {
 		inner = append(inner, innerArgs...)
 	}
@@ -449,6 +520,14 @@ func runStart(args []string, env *Env) int {
 		if err != nil {
 			fmt.Fprintln(env.Stderr, "omac start: sandbox argv:", err)
 			return ExitConfigInvalid
+		}
+		// Whitelist the control-plane port into the sandbox so the inner
+		// command (and the omac plugin inside it) can reach
+		// OMAC_CONTROL_BASE for live reloads.
+		if controlOK {
+			if _, port, perr := net.SplitHostPort(controlURL[len("http://"):]); perr == nil {
+				argv = injectOpenPort(argv, port)
+			}
 		}
 	}
 	if *verbose {
@@ -472,19 +551,24 @@ func runStart(args []string, env *Env) int {
 	// under nono proxy mode), and fall back to OMAC_<SKILL>_SOCKET_BASE
 	// for environments that prefer Unix sockets.
 	extra := map[string]string{
-		"OMAC_SOCKET":  socketPath,
-		"OMAC_HOST":    "127.0.0.1",
-		"OMAC_PORT":    fmt.Sprintf("%d", tcpPort),
-		"OMAC_BASE":    fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
-		"OMAC_SKILLS":  strings.Join(mounts, ","),
-		"OMAC_VERSION": env.Version,
+		"OMAC_SOCKET":             socketPath,
+		"OMAC_HOST":               "127.0.0.1",
+		"OMAC_PORT":               fmt.Sprintf("%d", tcpPort),
+		"OMAC_BASE":               fmt.Sprintf("http://127.0.0.1:%d/", tcpPort),
+		"OMAC_SKILLS":             strings.Join(mounts, ","),
+		"OMAC_VERSION":            env.Version,
+		"OMAC_HARNESS":            harness.Name,
+		"OMAC_HARNESS_SKILLS_DIR": harness.WorkdirSkillsDir(),
 	}
 	for _, m := range mounts {
 		extra[sandbox.OmacEnvName(m)] = sandbox.OmacTCPEnvValue(m, tcpPort)
 		extra[sandbox.OmacSocketEnvName(m)] = sandbox.OmacEnvValue(m, socketPath)
 	}
+	if controlOK {
+		extra["OMAC_CONTROL_BASE"] = controlURL
+	}
 
-	code, err := sandbox.Exec(argv, extra)
+	code, err := sandbox.ExecWithReady(argv, extra, nil)
 	if err != nil {
 		fmt.Fprintln(env.Stderr, "omac start: exec:", err)
 		return ExitSandboxAbnormal
@@ -498,9 +582,15 @@ func runStart(args []string, env *Env) int {
 // skill-config entries are deliberately NOT touched: an accidental
 // `rm -rf` shouldn't lose values.
 //
-// Operates under the registry's flock so concurrent `omac register`
+// The `global` flag selects which layer is being reconciled: the
+// user-global registry (~/.config/omac/sidecar.json) or the workdir
+// registry. Workdir-relative SkillDir paths only occur in the workdir
+// layer; global entries always store absolute paths, so joining with
+// env.Workdir for a non-absolute path is harmless either way.
+//
+// Operates under the matching flock so concurrent `omac register`
 // calls don't race with us.
-func autoDeregisterMissing(env *Env, reg *registry.Registry) ([]string, error) {
+func autoDeregisterMissing(env *Env, reg *registry.Registry, global bool) ([]string, error) {
 	if len(reg.Registered) == 0 {
 		return nil, nil
 	}
@@ -527,24 +617,71 @@ func autoDeregisterMissing(env *Env, reg *registry.Registry) ([]string, error) {
 	if len(pruned) == 0 {
 		return nil, nil
 	}
-	if err := registry.WithLock(env.Workdir, func() error {
+	reload := func() (*registry.Registry, error) { return registry.Load(env.Workdir) }
+	persist := func(r *registry.Registry) error { return registry.Save(env.Workdir, r) }
+	lock := func(fn func() error) error { return registry.WithLock(env.Workdir, fn) }
+	if global {
+		reload = registry.LoadGlobal
+		persist = registry.SaveGlobal
+		lock = registry.WithGlobalLock
+	}
+	if err := lock(func() error {
 		// Re-load under the lock and re-apply the prune. Don't reuse
 		// the in-memory reg (it might be stale relative to a parallel
 		// `omac register`).
-		fresh, err := registry.Load(env.Workdir)
+		fresh, err := reload()
 		if err != nil {
 			return err
 		}
 		for _, name := range pruned {
 			fresh.Remove(name)
 		}
-		return registry.Save(env.Workdir, fresh)
+		return persist(fresh)
 	}); err != nil {
 		return nil, err
 	}
 	// Update caller's view so subsequent steps don't iterate pruned skills.
 	reg.Registered = keep
 	return pruned, nil
+}
+
+// mergeRegistries returns a registry whose entries are the union of the
+// global and workdir layers, with the workdir entry winning on a name
+// collision (matching skillsource's "workdir wins" precedence). Neither
+// input is mutated.
+func mergeRegistries(global, workdir *registry.Registry) *registry.Registry {
+	out := &registry.Registry{Version: registry.SchemaVersion}
+	seen := map[string]struct{}{}
+	for _, e := range workdir.Registered {
+		out.Registered = append(out.Registered, e)
+		seen[e.Name] = struct{}{}
+	}
+	for _, e := range global.Registered {
+		if _, dup := seen[e.Name]; dup {
+			continue
+		}
+		out.Registered = append(out.Registered, e)
+		seen[e.Name] = struct{}{}
+	}
+	return out
+}
+
+// mergeConfig returns a store whose (skill, field) values are the union
+// of the global and workdir layers, with workdir values overriding
+// global ones field-by-field. Neither input is mutated.
+func mergeConfig(global, workdir *skillconfig.Store) *skillconfig.Store {
+	out := &skillconfig.Store{Version: skillconfig.SchemaVersion, Skills: map[string]map[string]string{}}
+	for skill, fields := range global.Skills {
+		for field, val := range fields {
+			out.Set(skill, field, val)
+		}
+	}
+	for skill, fields := range workdir.Skills {
+		for field, val := range fields {
+			out.Set(skill, field, val)
+		}
+	}
+	return out
 }
 
 // findUnregisteredSkills returns the names of every skill discovered
@@ -558,8 +695,30 @@ func autoDeregisterMissing(env *Env, reg *registry.Registry) ([]string, error) {
 // skillsource package for the full precedence list. Workdir-local
 // skills always win over user-global ones with the same name;
 // skillsource.Discover handles dedup internally.
-func findUnregisteredSkills(workdir string, reg *registry.Registry) ([]string, error) {
-	discovered, err := skillsource.Discover(workdir)
+// filterRegistryByHarness returns a copy of reg keeping only entries whose
+// skill directory is in the active harness's scope. A relative SkillDir (as
+// stored for workdir-local skills) is classified by its path segments; an
+// absolute one (global skills) likewise. Entries under no recognizable skills
+// base are kept (custom locations are not silently dropped).
+func filterRegistryByHarness(reg *registry.Registry, workdir string, harness config.Harness) *registry.Registry {
+	if reg == nil {
+		return reg
+	}
+	out := &registry.Registry{Version: reg.Version}
+	for _, e := range reg.Registered {
+		dir := e.SkillDir
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(workdir, dir)
+		}
+		if skillsource.DirInHarnessScope(dir, harness) {
+			out.Registered = append(out.Registered, e)
+		}
+	}
+	return out
+}
+
+func findUnregisteredSkills(workdir string, harness config.Harness, reg *registry.Registry) ([]string, error) {
+	discovered, err := skillsource.Discover(workdir, harness)
 	if err != nil {
 		return nil, err
 	}

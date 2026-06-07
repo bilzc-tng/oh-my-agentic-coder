@@ -33,7 +33,14 @@ type Registry struct {
 // It supersedes the older meta_hash that only covered omac.yaml,
 // so an install-script edit now invalidates the registration too.
 type Entry struct {
-	Name                string    `json:"name"`
+	Name string `json:"name"`
+	// Harness scopes this registration to one inner harness (e.g.
+	// "opencode", "claude-code"). The same skill name may be registered once
+	// per harness, each pointing at that harness's own skill dir, because a
+	// skill discovered for one harness is invisible to another. Empty means a
+	// legacy/unscoped entry that matches any harness (back-compat with
+	// registries written before harness scoping).
+	Harness             string    `json:"harness,omitempty"`
 	SkillDir            string    `json:"skill_dir"`
 	BundleHash          string    `json:"bundle_hash"`
 	RegisteredAt        time.Time `json:"registered_at"`
@@ -61,9 +68,64 @@ func LockPath(workdir string) string {
 	return filepath.Join(workdir, ".opencode", "sidecar.json.lock")
 }
 
+// GlobalDir returns the directory that holds user-global registration
+// state. It honors $XDG_CONFIG_HOME when set (per the XDG Base
+// Directory spec), falling back to $HOME/.config. The leaf is
+// "omac" to match the launcher config's global location
+// (~/.config/omac/config.yaml; see config.LoadLauncher).
+//
+// An empty string is returned when neither XDG_CONFIG_HOME nor a home
+// directory can be determined; callers should treat that as "no
+// global store available" and fall back to workdir-only behavior.
+func GlobalDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "omac")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "omac")
+}
+
+// GlobalPath returns the user-global registry file path, or "" when no
+// global directory can be resolved (see GlobalDir).
+func GlobalPath() string {
+	dir := GlobalDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "sidecar.json")
+}
+
+// GlobalLockPath returns the flock path guarding the global registry,
+// or "" when no global directory can be resolved.
+func GlobalLockPath() string {
+	dir := GlobalDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "sidecar.json.lock")
+}
+
 // Load reads the registry at workdir. A missing file returns an empty registry.
 func Load(workdir string) (*Registry, error) {
-	p := Path(workdir)
+	return loadFrom(Path(workdir))
+}
+
+// LoadGlobal reads the user-global registry. A missing file (or an
+// unresolvable global directory) returns an empty registry, so callers
+// can always merge it in unconditionally.
+func LoadGlobal() (*Registry, error) {
+	p := GlobalPath()
+	if p == "" {
+		return &Registry{Version: SchemaVersion}, nil
+	}
+	return loadFrom(p)
+}
+
+// loadFrom reads and parses a registry file at an arbitrary path.
+func loadFrom(p string) (*Registry, error) {
 	raw, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Registry{Version: SchemaVersion}, nil
@@ -84,12 +146,27 @@ func Load(workdir string) (*Registry, error) {
 // Save atomically writes the registry to disk. The caller should hold the
 // workdir lock (see WithLock).
 func Save(workdir string, r *Registry) error {
+	return saveTo(filepath.Join(workdir, ".opencode"), Path(workdir), r)
+}
+
+// SaveGlobal atomically writes the user-global registry. The caller
+// should hold the global lock (see WithGlobalLock). Returns an error
+// when no global directory can be resolved.
+func SaveGlobal(r *Registry) error {
+	dir := GlobalDir()
+	if dir == "" {
+		return fmt.Errorf("registry: no global config directory available (set $HOME or $XDG_CONFIG_HOME)")
+	}
+	return saveTo(dir, filepath.Join(dir, "sidecar.json"), r)
+}
+
+// saveTo atomically writes r to finalPath, creating dir (0700) first.
+func saveTo(dir, finalPath string, r *Registry) error {
 	if r.Version == 0 {
 		r.Version = SchemaVersion
 	}
-	dir := filepath.Join(workdir, ".opencode")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("ensure .opencode dir: %w", err)
+		return fmt.Errorf("ensure registry dir: %w", err)
 	}
 	// Deterministic ordering for diffs.
 	sort.SliceStable(r.Registered, func(i, j int) bool {
@@ -118,14 +195,17 @@ func Save(workdir string, r *Registry) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp: %w", err)
 	}
-	if err := os.Rename(tmpPath, Path(workdir)); err != nil {
+	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename registry: %w", err)
 	}
 	return nil
 }
 
-// Find returns the entry for name (or nil) and its index (or -1).
+// Find returns the entry for name (or nil) and its index (or -1). It matches
+// by name only, returning the first entry — kept for back-compat with callers
+// that don't care about harness scoping. Prefer FindForHarness when a harness
+// context exists.
 func (r *Registry) Find(name string) (*Entry, int) {
 	for i := range r.Registered {
 		if r.Registered[i].Name == name {
@@ -135,18 +215,77 @@ func (r *Registry) Find(name string) (*Entry, int) {
 	return nil, -1
 }
 
-// Upsert inserts or updates an entry.
+// FindForHarness returns the entry for (name, harness) and its index. An entry
+// with an empty Harness is treated as a legacy/unscoped match for any harness.
+// An exact harness match is preferred over a legacy match.
+func (r *Registry) FindForHarness(name, harness string) (*Entry, int) {
+	legacyIdx := -1
+	for i := range r.Registered {
+		if r.Registered[i].Name != name {
+			continue
+		}
+		if r.Registered[i].Harness == harness {
+			return &r.Registered[i], i
+		}
+		if r.Registered[i].Harness == "" && legacyIdx < 0 {
+			legacyIdx = i
+		}
+	}
+	if legacyIdx >= 0 {
+		return &r.Registered[legacyIdx], legacyIdx
+	}
+	return nil, -1
+}
+
+// Upsert inserts or updates an entry, keyed by (Name, Harness). Two entries
+// with the same name but different harnesses coexist. When e.Harness is empty
+// (legacy), it keys by name only for back-compat.
 func (r *Registry) Upsert(e Entry) {
-	if _, idx := r.Find(e.Name); idx >= 0 {
+	idx := -1
+	if e.Harness == "" {
+		_, idx = r.Find(e.Name)
+	} else {
+		_, idx = r.findExact(e.Name, e.Harness)
+		if idx < 0 {
+			// Upgrade a pre-existing legacy (unscoped) entry of the same name
+			// to this harness, rather than leaving a duplicate behind.
+			if _, lidx := r.findExact(e.Name, ""); lidx >= 0 {
+				idx = lidx
+			}
+		}
+	}
+	if idx >= 0 {
 		r.Registered[idx] = e
 		return
 	}
 	r.Registered = append(r.Registered, e)
 }
 
-// Remove deletes an entry by name. Returns true if something was removed.
+// findExact matches by both name and harness exactly (no legacy fallback).
+func (r *Registry) findExact(name, harness string) (*Entry, int) {
+	for i := range r.Registered {
+		if r.Registered[i].Name == name && r.Registered[i].Harness == harness {
+			return &r.Registered[i], i
+		}
+	}
+	return nil, -1
+}
+
+// Remove deletes the first entry matching name (any harness). Returns true if
+// something was removed.
 func (r *Registry) Remove(name string) bool {
 	_, idx := r.Find(name)
+	if idx < 0 {
+		return false
+	}
+	r.Registered = append(r.Registered[:idx], r.Registered[idx+1:]...)
+	return true
+}
+
+// RemoveForHarness deletes the entry matching (name, harness), preferring an
+// exact harness match, else a legacy unscoped one. Returns true if removed.
+func (r *Registry) RemoveForHarness(name, harness string) bool {
+	_, idx := r.FindForHarness(name, harness)
 	if idx < 0 {
 		return false
 	}
@@ -157,11 +296,27 @@ func (r *Registry) Remove(name string) bool {
 // WithLock acquires an exclusive flock on sidecar.json.lock for the
 // duration of fn. The lock file is created 0600.
 func WithLock(workdir string, fn func() error) error {
-	dir := filepath.Join(workdir, ".opencode")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("ensure .opencode dir: %w", err)
+	return withLockAt(filepath.Join(workdir, ".opencode"), LockPath(workdir), fn)
+}
+
+// WithGlobalLock acquires an exclusive flock on the user-global
+// sidecar.json.lock for the duration of fn. Returns an error when no
+// global directory can be resolved.
+func WithGlobalLock(fn func() error) error {
+	dir := GlobalDir()
+	if dir == "" {
+		return fmt.Errorf("registry: no global config directory available (set $HOME or $XDG_CONFIG_HOME)")
 	}
-	f, err := os.OpenFile(LockPath(workdir), os.O_CREATE|os.O_RDWR, 0o600)
+	return withLockAt(dir, filepath.Join(dir, "sidecar.json.lock"), fn)
+}
+
+// withLockAt is the shared flock primitive: it ensures dir exists,
+// acquires an exclusive lock on lockPath, and runs fn while held.
+func withLockAt(dir, lockPath string, fn func() error) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("ensure registry dir: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open lock: %w", err)
 	}

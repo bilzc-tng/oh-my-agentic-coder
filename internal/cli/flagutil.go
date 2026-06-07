@@ -1,6 +1,41 @@
 package cli
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
+)
+
+// splitHarnessToken inspects the first token of a subcommand's args and
+// resolves the inner-harness selector.
+//
+// The first positional slot (before any flag and before "--") is the harness
+// selector slot:
+//
+//   - empty args, a leading flag, or a leading "--": no selector given →
+//     default harness, args unchanged.
+//   - a known harness name/alias: consume it → that harness, remaining args.
+//   - any other bareword: treated as an attempted-but-unknown harness and
+//     rejected (err non-nil), so typos like `omac start claud` fail loudly
+//     instead of being silently passed through as an inner argument. Inner
+//     arguments that happen to be barewords must be placed after "--".
+//
+// This implements the positional-harness UX: `omac start claude --verbose`,
+// `omac start opencode`, `omac start` (defaults to opencode), and
+// `omac start -- some-inner-arg`.
+func splitHarnessToken(args []string) (config.Harness, []string, error) {
+	if len(args) == 0 {
+		return config.DefaultHarness(), args, nil
+	}
+	first := args[0]
+	if first == "" || first == "--" || isFlag(first) {
+		return config.DefaultHarness(), args, nil
+	}
+	if h, ok := config.LookupHarness(first); ok {
+		return h, args[1:], nil
+	}
+	return config.Harness{}, nil, config.UnknownHarnessError(first)
+}
 
 // reorderFlagsFirst sorts args so all flag-like tokens ("-x", "--xx", "--xx=v")
 // come before any positional. A bare "--" is a hard stop that forwards the rest

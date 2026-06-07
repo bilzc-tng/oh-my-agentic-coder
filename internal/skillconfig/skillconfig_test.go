@@ -7,6 +7,38 @@ import (
 	"testing"
 )
 
+// TestGlobalRoundTrip verifies the user-global store writes to
+// $XDG_CONFIG_HOME/omac/skill-config.yaml and round-trips independently
+// of any workdir.
+func TestGlobalRoundTrip(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	want := filepath.Join(xdg, "omac", "skill-config.yaml")
+	if got := GlobalPath(); got != want {
+		t.Fatalf("GlobalPath() = %q, want %q", got, want)
+	}
+
+	s, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal (missing): %v", err)
+	}
+	s.Set("tng-email", "IMAP_HOST", "imap.example.com")
+	if err := SaveGlobal(s); err != nil {
+		t.Fatalf("SaveGlobal: %v", err)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("global skill-config file missing: %v", err)
+	}
+	loaded, err := LoadGlobal()
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if v, ok := loaded.Get("tng-email", "IMAP_HOST"); !ok || v != "imap.example.com" {
+		t.Fatalf("round-trip mismatch: got %q ok=%v", v, ok)
+	}
+}
+
 func TestStore_RoundTrip(t *testing.T) {
 	dir := t.TempDir()
 
@@ -180,5 +212,26 @@ func TestStore_BadYAML(t *testing.T) {
 	_, err := Load(dir)
 	if err == nil || !strings.Contains(err.Error(), "parse skill-config") {
 		t.Fatalf("Load: expected parse error, got %v", err)
+	}
+}
+
+func TestDefaultsRoundTrip(t *testing.T) {
+	s := &Store{Version: SchemaVersion, Skills: map[string]map[string]string{}}
+	// Simulate first register: store a value AND mirror to defaults.
+	s.Set("slack", "REGION", "eu")
+	s.SetDefault("slack", "REGION", "eu")
+
+	v, ok := s.GetDefault("slack", "REGION")
+	if !ok || v != "eu" {
+		t.Fatalf("GetDefault = %q,%v want eu,true", v, ok)
+	}
+	// Backfill case: a value present in Skills but not Defaults gets mirrored.
+	s2 := &Store{Version: SchemaVersion, Skills: map[string]map[string]string{"x": {"F": "1"}}}
+	if _, ok := s2.GetDefault("x", "F"); ok {
+		t.Fatal("precondition: no default yet")
+	}
+	s2.SetDefault("x", "F", "1")
+	if v, ok := s2.GetDefault("x", "F"); !ok || v != "1" {
+		t.Errorf("backfilled default = %q,%v", v, ok)
 	}
 }

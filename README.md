@@ -8,6 +8,68 @@ environment through a single Unix-domain-socket facade. Per-skill secrets are
 stored in the OS keychain and injected into sidecar processes at start time —
 they never reach the sandbox.
 
+## Choosing an inner harness
+
+omac is harness-agnostic: it launches an inner agentic coder inside the
+sandbox and exposes skills to it through a stable `OMAC_*` / REST contract. The
+harness is selected by an optional **positional token** after `start` / `serve`:
+
+```bash
+omac start            # default harness (opencode) — unchanged behavior
+omac start opencode   # OpenCode
+omac start claude     # Claude Code
+omac serve claude     # multi-directory server, Claude Code harness
+```
+
+Supported harnesses (and aliases): `opencode` (`oc`), `claude-code`
+(`claude`, `cc`). Omitting the token defaults to `opencode`. An unknown token
+is rejected with the list of supported names. Inner arguments that happen to be
+barewords go after `--` (e.g. `omac start claude -- --model sonnet`).
+
+Each harness ships a small client-side **bridge** that wires the agent to
+omac's control plane (skill activation, the skills manifest, skill base URLs):
+
+| Harness     | Bridge location              | Mechanism                         |
+| ----------- | ---------------------------- | --------------------------------- |
+| OpenCode    | `.opencode/plugins/`         | OpenCode plugin (`omac-multidir.ts`) |
+| Claude Code | `.claude/` (settings + hook) | `SessionStart`/`SessionEnd` hooks |
+
+Skills themselves are **harness-agnostic** — the same skill works unchanged
+under any harness. Adding a new agentic harness means registering one
+descriptor in `internal/config/harness.go` plus shipping its bridge; no
+command-dispatch code changes. See `CREATING_A_SKILL.md` and
+`docs/MULTI_DIR_DESKTOP.md`.
+
+### Harness-scoped skill discovery
+
+Each harness reads `SKILL.md` from its **own** skills directory, and omac
+matches that: discovery is scoped to the active harness.
+
+| Harness     | Own skills dir (workdir / global)              |
+| ----------- | ---------------------------------------------- |
+| OpenCode    | `.opencode/skills` / `~/.config/opencode/skills` |
+| Claude Code | `.claude/skills` / `~/.claude/skills`            |
+| *(shared)*  | `.agents/skills` / `~/.config/agents/skills`     |
+
+- The active harness scans **its own dir + the shared `.agents/skills`**, and
+  **never** the other harness's dir. So `omac start claude` ignores skills that
+  live only under `.opencode/skills`, and vice versa. Put a skill in
+  `.agents/skills` to share it across all harnesses.
+- A skill name can be **registered once per harness** (each pointing at that
+  harness's dir); registering for one harness does not disturb the other.
+- The marketplace `/install` defaults to the **active harness's** dir (so
+  installed skills land where that harness loads them); pass `target_path` to
+  override (e.g. `.agents/skills` for a shared skill).
+
+When a skill name is ambiguous at register time, omac stops and asks you to
+pick:
+
+```bash
+omac register slack                      # if ambiguous, prints the candidates
+omac register slack --harness claude     # pick the harness
+omac register slack --global             # pick the user-global one over workdir
+```
+
 ## Installation
 
 Pre-built binaries and packages are published to
@@ -97,17 +159,84 @@ internal/sandbox/          Templated sandbox-runtime launcher.
 ## Build
 
 ```bash
+# Plain dev build (version reports as the default "0.1.0-dev").
 go build -o omac ./cmd/omac
+```
+
+### Release-style local build
+
+Reproduce the release binary for your current platform — stripped
+(`-s -w`), reproducible (`-trimpath`), with the version stamped in (the
+same ldflags GoReleaser uses; see `.goreleaser.yaml`):
+
+```bash
+go build -trimpath -ldflags "-s -w -X main.Version=0.1.0-local" -o omac ./cmd/omac
+./omac version   # -> omac 0.1.0-local   (note: `version` subcommand, not --version)
+```
+
+For the full multi-platform release artifacts (archives, `.deb`,
+`.pkg.tar.zst`, checksums) build with GoReleaser, no tag or publish:
+
+```bash
+brew install goreleaser
+goreleaser release --clean --snapshot --skip=publish   # output in dist/
+# current platform only:
+goreleaser build --clean --snapshot --single-target
 ```
 
 ## Test
 
 ```bash
+# Unit + integration tests for every package.
 go test ./...
+
+# Formatting and static checks (run both before committing).
+gofmt -l .        # prints nothing when clean
+go vet ./...
 ```
 
-The facade test skips automatically in environments where Unix-socket
-`connect(2)` is disallowed.
+Some facade and serve tests open a loopback TCP port (and/or a Unix
+socket) and skip automatically in environments where `connect(2)` to
+`127.0.0.1` or to a Unix socket is disallowed (e.g. a hardened sandbox).
+On a normal dev machine they all run.
+
+### Multi-directory serve mode (`omac serve`)
+
+End-to-end smoke test of the control plane, facade routing, per-workdir
+isolation, and a real skill round trip (requires loopback; needs `curl`
+and `python3`):
+
+```bash
+bash scripts/serve_smoke.sh        # expect "PASS=15  FAIL=0 / ALL GREEN"
+```
+
+The OpenCode-side plugin (`.opencode/plugins/omac-multidir.ts`)
+typechecks against the published plugin types:
+
+```bash
+cd .opencode
+npx -p typescript tsc --noEmit --strict --moduleResolution bundler \
+  --module esnext --target es2022 --lib es2022,dom --skipLibCheck \
+  plugins/omac-multidir.ts
+```
+
+To try it with a real OpenCode server, see
+[`docs/MULTI_DIR_DESKTOP.md`](docs/MULTI_DIR_DESKTOP.md):
+
+```bash
+# Wrap `opencode serve`; --root pre-declares the allowed project roots.
+# The positional harness token (opencode|claude) goes right after `serve`.
+omac serve opencode --no-sandbox --root "$HOME/code" --verbose -- --port 4096 --print-logs
+# Note the logged "control plane on http://127.0.0.1:<CTRL>", then open a
+# project under the root in OpenCode Desktop and confirm activation:
+#   curl -s http://127.0.0.1:<CTRL>/__omac__/dirs | python3 -m json.tool
+```
+
+Under the Claude Code harness, `omac serve claude` / `omac start claude` run
+the `claude` CLI instead; the `.claude/` hooks bridge it to the same control
+plane. Claude Code has no `opencode serve`-style daemon convention, so it runs
+as-is (no subcommand is injected). See `docs/MULTI_DIR_DESKTOP.md` for the
+per-harness `serve` notes and limitations.
 
 ## Typical workflow
 
@@ -129,7 +258,8 @@ omac list
 omac secrets list slack
 
 # 5. Launch the full stack: sidecars → facade (Unix socket) → sandbox → agent.
-omac start
+omac start            # default harness (opencode)
+# or: omac start claude   # launch Claude Code as the inner harness instead
 
 # Inside the sandbox the skill reaches its sidecar via the socket:
 #   curl --unix-socket "$OMAC_SOCKET" http://x/slack/api/chat.postMessage ...

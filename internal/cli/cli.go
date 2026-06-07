@@ -120,7 +120,9 @@ func commands() map[string]Command {
 		"list":       {Name: "list", Short: "List registered skills.", Run: runList},
 		"secrets":    {Name: "secrets", Short: "Manage skill secrets in the OS keychain.", Run: runSecrets},
 		"config":     {Name: "config", Short: "Show resolved config + secret fingerprints for a skill.", Run: runConfig},
-		"start":      {Name: "start", Short: "Start sidecars + facade + sandbox.", Run: runStart},
+		"start":      {Name: "start", Short: "Start sidecars + facade + sandbox. Optional [harness]: opencode|claude.", Run: runStart},
+		"serve":      {Name: "serve", Short: "Long-lived multi-directory server. Optional [harness]: opencode|claude.", Run: runServe},
+		"plugin":     {Name: "plugin", Short: "Install client-side harness bridge plugins (e.g. opencode-desktop).", Run: runPlugin},
 		"doctor":     {Name: "doctor", Short: "Run sanity checks.", Run: runDoctor},
 		"version":    {Name: "version", Short: "Print version.", Run: runVersion},
 	}
@@ -143,9 +145,16 @@ Subcommands:
   list         List registered skills.
   secrets      Manage skill secrets in the OS keychain.
   config       Show resolved config + secret fingerprints for a skill.
-  start        Start sidecars + facade + sandbox.
+  start        Start sidecars + facade + sandbox.       [harness]: opencode|claude
+  serve        Long-lived multi-directory server.        [harness]: opencode|claude
+  plugin       Install client-side bridge plugins (e.g. opencode-desktop).
   doctor       Run sanity checks.
   version      Print version.
+
+Harness selection (start/serve):
+  omac start            # default harness (opencode)
+  omac start opencode   # OpenCode
+  omac start claude     # Claude Code
 
 Run 'omac <subcommand> --help' for subcommand-specific flags.`)
 }

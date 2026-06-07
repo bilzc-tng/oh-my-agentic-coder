@@ -46,8 +46,28 @@ type FacadeConfig struct {
 }
 
 // DefaultLauncherConfig returns a config that ships as the compiled-in default.
-// It matches the existing tng-opencode invocation at the repo root.
+//
+// The sandboxed profiles (nono, nono-netprofile) deliberately ship with an
+// EMPTY inner_cmd: the inner command is supplied by the selected harness (the
+// positional `omac start <harness>` token; default opencode) via
+// Harness.ResolveInnerCmd. This is what lets `omac start claude` actually run
+// Claude Code without editing config. A user who pins a profile's inner_cmd in
+// their own oh-my-agentic-coder.yaml still wins (that explicit value takes
+// precedence over the harness default — see ResolveInnerCmd). The
+// no-sandbox-debug profile keeps its explicit `bash` because it is a debug
+// shell, not an agent harness.
 func DefaultLauncherConfig() LauncherConfig {
+	return defaultLauncherConfigFor(DefaultHarness())
+}
+
+// defaultLauncherConfigFor builds the default launcher config. The harness
+// argument is currently only used to keep the signature future-proof and to
+// let tests assert harness-independence; the sandboxed profiles intentionally
+// leave inner_cmd empty so the harness fills it at launch. The sandbox
+// *command* templates are harness-independent (they only reference
+// {{inner_cmd}} / {{inner_args}} placeholders).
+func defaultLauncherConfigFor(h Harness) LauncherConfig {
+	_ = h // inner_cmd is supplied by the harness at resolve time, not baked here
 	return LauncherConfig{
 		Sandbox: SandboxConfig{
 			DefaultProfile: "nono",
@@ -117,7 +137,8 @@ func DefaultLauncherConfig() LauncherConfig {
 						"--",
 						"{{inner_cmd}}", "{{inner_args}}",
 					},
-					InnerCmd: []string{"opencode"},
+					// Empty: filled by the selected harness at launch.
+					InnerCmd: nil,
 				},
 				// Same as above but adds --network-profile opencode so
 				// outbound HTTP goes through nono's credential-injection
@@ -135,7 +156,8 @@ func DefaultLauncherConfig() LauncherConfig {
 						"--",
 						"{{inner_cmd}}", "{{inner_args}}",
 					},
-					InnerCmd: []string{"opencode"},
+					// Empty: filled by the selected harness at launch.
+					InnerCmd: nil,
 				},
 				"no-sandbox-debug": {
 					Command:  []string{"{{inner_cmd}}", "{{inner_args}}"},

@@ -31,7 +31,17 @@ import (
 
 // SidecarSpec is the supervisor's view of one sidecar to run.
 type SidecarSpec struct {
-	Name           string
+	// Name is the supervisor's unique tracking key for this sidecar (used
+	// by StopSidecar and log filenames). In serve mode it may be a
+	// namespaced value like "__global__/skill-marketplace" so two
+	// directories' same-named skills stay distinct.
+	Name string
+	// SkillName is the plain skill name exposed to the sidecar as
+	// SIDECAR_SKILL. It must NOT contain a namespace prefix or any path
+	// separator, because sidecars commonly use it to build filesystem
+	// paths (e.g. tempfile prefixes). When empty, Name is used (the
+	// single-workdir `start` case, where Name is already the plain name).
+	SkillName      string
 	SkillDir       string // absolute
 	Command        []string
 	EnvPassthrough []string
@@ -46,6 +56,12 @@ type SidecarSpec struct {
 	Health  config.HealthSpec
 	LogPath string
 	Workdir string // host workdir
+	// HarnessSkillsDir is the active harness's workdir-relative skills
+	// directory (e.g. ".opencode/skills", ".claude/skills"), injected as
+	// OMAC_HARNESS_SKILLS_DIR so skills that install into the project (the
+	// marketplace) default to the dir the running harness loads. Empty when
+	// no harness context is available.
+	HarnessSkillsDir string
 }
 
 // Running represents a started sidecar.
@@ -87,6 +103,51 @@ func (s *Supervisor) StartAll(ctx context.Context, specs []SidecarSpec) ([]*Runn
 	return out, nil
 }
 
+// AddSidecar starts a single sidecar at runtime and tracks it. Used by
+// serve mode to bring a directory's skills (or a global skill) online
+// lazily, after StartAll has already run (or instead of it). Safe to call
+// concurrently. On health-check failure the child is torn down and the
+// error returned; nothing is added to the tracked set.
+func (s *Supervisor) AddSidecar(ctx context.Context, spec SidecarSpec) (*Running, error) {
+	r, err := s.startOne(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	s.children = append(s.children, r)
+	s.mu.Unlock()
+	return r, nil
+}
+
+// StopSidecar terminates the tracked sidecar with the given name and
+// removes it from the tracked set. A no-op (returns false) if no such
+// sidecar is tracked. Used by serve mode on directory deactivation and
+// when swapping a stub for a live route.
+func (s *Supervisor) StopSidecar(name string, timeout time.Duration) bool {
+	s.mu.Lock()
+	var target *Running
+	keep := s.children[:0:0]
+	for _, r := range s.children {
+		if r.Name == name && target == nil {
+			target = r
+			continue
+		}
+		keep = append(keep, r)
+	}
+	if target != nil {
+		s.children = keep
+	}
+	s.mu.Unlock()
+	if target == nil {
+		return false
+	}
+	_ = terminate(target.Cmd, timeout)
+	if target.LogFile != nil {
+		_ = target.LogFile.Close()
+	}
+	return true
+}
+
 // startOne allocates a port, spawns the child, and waits on health.
 func (s *Supervisor) startOne(ctx context.Context, spec SidecarSpec) (*Running, error) {
 	port, err := allocEphemeralPort()
@@ -112,6 +173,14 @@ func (s *Supervisor) startOne(ctx context.Context, spec SidecarSpec) (*Running, 
 		lf.Close()
 		return nil, fmt.Errorf("%s: empty command", spec.Name)
 	}
+
+	// Some skills declare command: ["./scripts/sidecar.py"] and rely on the
+	// script being executable (shebang). Installers (e.g. the marketplace)
+	// don't always preserve/set the execute bit when unpacking, which makes
+	// the spawn fail with "permission denied". omac owns the spawn, so make
+	// a relative in-skill script executable before exec'ing it — no manual
+	// `chmod +x` required after install.
+	ensureExecutable(spec.SkillDir, argv[0])
 
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = spec.SkillDir
@@ -161,8 +230,15 @@ func (s *Supervisor) buildEnv(spec SidecarSpec, port int) []string {
 	}
 	// Facade-injected.
 	vars["SIDECAR_PORT"] = fmt.Sprint(port)
-	vars["SIDECAR_SKILL"] = spec.Name
+	skillName := spec.SkillName
+	if skillName == "" {
+		skillName = spec.Name
+	}
+	vars["SIDECAR_SKILL"] = skillName
 	vars["OMAC_WORKDIR"] = spec.Workdir
+	if spec.HarnessSkillsDir != "" {
+		vars["OMAC_HARNESS_SKILLS_DIR"] = spec.HarnessSkillsDir
+	}
 
 	// Non-secret config fields. Win over passthrough; lose to secrets
 	// (which is also a meta-validation-time error, so practically these
@@ -271,6 +347,35 @@ func allocEphemeralPort() (int, error) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	return port, nil
+}
+
+// ensureExecutable makes a relative in-skill script executable so it can be
+// exec'd directly (command: ["./scripts/sidecar.py"]). It is a no-op for
+// absolute paths and bare interpreter names (e.g. "python3", resolved on
+// PATH) — only a path that resolves to an existing regular file *inside*
+// skillDir is touched, and only to add the owner-execute bit if missing.
+func ensureExecutable(skillDir, exe string) {
+	// Bare command (interpreter on PATH) — nothing in the skill to chmod.
+	if !strings.Contains(exe, "/") {
+		return
+	}
+	path := exe
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(skillDir, exe)
+	}
+	// Confine to the skill directory: don't chmod arbitrary absolute paths.
+	rel, err := filepath.Rel(skillDir, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return
+	}
+	if info.Mode()&0o100 != 0 {
+		return // already owner-executable
+	}
+	_ = os.Chmod(path, info.Mode()|0o100)
 }
 
 // expandArgv expands ${VAR} tokens inside argv elements from vars.

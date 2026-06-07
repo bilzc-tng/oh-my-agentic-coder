@@ -1,0 +1,7 @@
+version: 1
+skills:
+  echo-rest:
+    ECHO_GREETING: hello
+    ECHO_MAX_TICK: "100"
+    ECHO_MODE: demo
+    ECHO_VERBOSE: "false"

@@ -35,6 +35,12 @@ const SchemaVersion = 1
 type Store struct {
 	Version int                          `yaml:"version"`
 	Skills  map[string]map[string]string `yaml:"skills"`
+	// Defaults holds "last-known-good" config values keyed by
+	// skill→field, mirrored on every write so a future `register
+	// --defaults` elsewhere can reuse them as suggestions
+	// (docs/MULTI_DIR_DESKTOP.md §4.4). Only meaningful in the global
+	// store; never consulted at runtime (runtime uses Skills only).
+	Defaults map[string]map[string]string `yaml:"defaults,omitempty"`
 }
 
 // Path returns the skill-config file path for a given workdir.
@@ -42,9 +48,48 @@ func Path(workdir string) string {
 	return filepath.Join(workdir, ".opencode", "skill-config.yaml")
 }
 
+// GlobalDir returns the directory holding user-global skill config. It
+// honors $XDG_CONFIG_HOME (falling back to $HOME/.config) with an
+// "omac" leaf, matching the launcher config's global location. An
+// empty string means no global directory could be resolved.
+func GlobalDir() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return filepath.Join(xdg, "omac")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "omac")
+}
+
+// GlobalPath returns the user-global skill-config file path, or "" when
+// no global directory can be resolved.
+func GlobalPath() string {
+	dir := GlobalDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "skill-config.yaml")
+}
+
 // Load reads the file at workdir. A missing file returns an empty Store.
 func Load(workdir string) (*Store, error) {
-	p := Path(workdir)
+	return loadFrom(Path(workdir))
+}
+
+// LoadGlobal reads the user-global store. A missing file (or an
+// unresolvable global directory) returns an empty Store.
+func LoadGlobal() (*Store, error) {
+	p := GlobalPath()
+	if p == "" {
+		return &Store{Version: SchemaVersion, Skills: map[string]map[string]string{}}, nil
+	}
+	return loadFrom(p)
+}
+
+// loadFrom reads and parses a store from an arbitrary path.
+func loadFrom(p string) (*Store, error) {
 	raw, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return &Store{Version: SchemaVersion, Skills: map[string]map[string]string{}}, nil
@@ -68,15 +113,30 @@ func Load(workdir string) (*Store, error) {
 // Save atomically writes the store to disk. The caller should hold the
 // workdir lock (registry.WithLock).
 func Save(workdir string, s *Store) error {
+	return saveTo(filepath.Join(workdir, ".opencode"), Path(workdir), s)
+}
+
+// SaveGlobal atomically writes the user-global store. The caller should
+// hold the global lock (registry.WithGlobalLock). Returns an error when
+// no global directory can be resolved.
+func SaveGlobal(s *Store) error {
+	dir := GlobalDir()
+	if dir == "" {
+		return fmt.Errorf("skill-config: no global config directory available (set $HOME or $XDG_CONFIG_HOME)")
+	}
+	return saveTo(dir, filepath.Join(dir, "skill-config.yaml"), s)
+}
+
+// saveTo atomically writes s to finalPath, creating dir (0700) first.
+func saveTo(dir, finalPath string, s *Store) error {
 	if s.Version == 0 {
 		s.Version = SchemaVersion
 	}
 	if s.Skills == nil {
 		s.Skills = map[string]map[string]string{}
 	}
-	dir := filepath.Join(workdir, ".opencode")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("ensure .opencode dir: %w", err)
+		return fmt.Errorf("ensure config dir: %w", err)
 	}
 
 	// yaml.v3's encoder sorts map keys alphabetically by default, so
@@ -114,7 +174,7 @@ func Save(workdir string, s *Store) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp: %w", err)
 	}
-	if err := os.Rename(tmpPath, Path(workdir)); err != nil {
+	if err := os.Rename(tmpPath, finalPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename skill-config: %w", err)
 	}
@@ -169,6 +229,39 @@ func (s *Store) RemoveSkill(skill string) bool {
 		return false
 	}
 	delete(s.Skills, skill)
+	return true
+}
+
+// GetDefault returns the remembered default for a (skill, field), plus
+// whether present (docs/MULTI_DIR_DESKTOP.md §4.4).
+func (s *Store) GetDefault(skill, field string) (string, bool) {
+	if m, ok := s.Defaults[skill]; ok {
+		v, present := m[field]
+		return v, present
+	}
+	return "", false
+}
+
+// SetDefault records a remembered default for a (skill, field).
+func (s *Store) SetDefault(skill, field, value string) {
+	if s.Defaults == nil {
+		s.Defaults = map[string]map[string]string{}
+	}
+	m, ok := s.Defaults[skill]
+	if !ok {
+		m = map[string]string{}
+		s.Defaults[skill] = m
+	}
+	m[field] = value
+}
+
+// RemoveDefaults drops every remembered default for a skill. Used by
+// `deregister --purge-defaults`. Returns true if anything was removed.
+func (s *Store) RemoveDefaults(skill string) bool {
+	if _, ok := s.Defaults[skill]; !ok {
+		return false
+	}
+	delete(s.Defaults, skill)
 	return true
 }
 

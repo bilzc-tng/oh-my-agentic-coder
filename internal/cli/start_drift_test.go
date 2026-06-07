@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
 )
 
@@ -44,6 +45,26 @@ func stageWorkdir(t *testing.T, skills ...string) string {
 	return dir
 }
 
+// stageUserGlobalSkill creates a user-global skill source under
+// $XDG_CONFIG_HOME/opencode/skills/<name>/omac.yaml (falling back to
+// $HOME/.config when XDG_CONFIG_HOME is unset). Callers must have
+// already pointed HOME / XDG_CONFIG_HOME at a temp dir.
+func stageUserGlobalSkill(t *testing.T, name string) string {
+	t.Helper()
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		base = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	skillDir := filepath.Join(base, "opencode", "skills", name)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", skillDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "omac.yaml"), []byte("name: "+name+"\n"), 0o644); err != nil {
+		t.Fatalf("write omac.yaml: %v", err)
+	}
+	return skillDir
+}
+
 func makeEnv(workdir string) *Env {
 	null, _ := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	return &Env{
@@ -65,7 +86,7 @@ func TestAutoDeregisterMissing_DeletesGoneSkills(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 
-	pruned, err := autoDeregisterMissing(makeEnv(dir), reg)
+	pruned, err := autoDeregisterMissing(makeEnv(dir), reg, false)
 	if err != nil {
 		t.Fatalf("autoDeregisterMissing: %v", err)
 	}
@@ -93,7 +114,7 @@ func TestAutoDeregisterMissing_NoOpWhenAllPresent(t *testing.T) {
 		{Name: "alpha", SkillDir: ".opencode/skills/alpha"},
 		{Name: "bravo", SkillDir: ".opencode/skills/bravo"},
 	}}
-	pruned, err := autoDeregisterMissing(makeEnv(dir), reg)
+	pruned, err := autoDeregisterMissing(makeEnv(dir), reg, false)
 	if err != nil {
 		t.Fatalf("autoDeregisterMissing: %v", err)
 	}
@@ -108,7 +129,7 @@ func TestAutoDeregisterMissing_NoOpWhenAllPresent(t *testing.T) {
 func TestAutoDeregisterMissing_EmptyRegistry(t *testing.T) {
 	dir := stageWorkdir(t)
 	reg := &registry.Registry{}
-	pruned, err := autoDeregisterMissing(makeEnv(dir), reg)
+	pruned, err := autoDeregisterMissing(makeEnv(dir), reg, false)
 	if err != nil {
 		t.Fatalf("autoDeregisterMissing: %v", err)
 	}
@@ -123,7 +144,7 @@ func TestFindUnregisteredSkills_FindsNew(t *testing.T) {
 	reg := &registry.Registry{Registered: []registry.Entry{
 		{Name: "alpha"}, // bravo and charlie are unregistered
 	}}
-	got, err := findUnregisteredSkills(dir, reg)
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -140,7 +161,7 @@ func TestFindUnregisteredSkills_AllRegistered(t *testing.T) {
 		{Name: "alpha"},
 		{Name: "bravo"},
 	}}
-	got, err := findUnregisteredSkills(dir, reg)
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -159,7 +180,7 @@ func TestFindUnregisteredSkills_SkipsDirsWithoutMetaYaml(t *testing.T) {
 		t.Fatal(err)
 	}
 	reg := &registry.Registry{Registered: []registry.Entry{{Name: "alpha"}}}
-	got, err := findUnregisteredSkills(dir, reg)
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -174,7 +195,7 @@ func TestFindUnregisteredSkills_NoSkillsDir(t *testing.T) {
 	// been installed.
 	isolateHome(t)
 	dir := t.TempDir()
-	got, err := findUnregisteredSkills(dir, &registry.Registry{})
+	got, err := findUnregisteredSkills(dir, config.DefaultHarness(), &registry.Registry{})
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -202,7 +223,7 @@ func TestFindUnregisteredSkills_SeesUserGlobal(t *testing.T) {
 	}
 
 	reg := &registry.Registry{Registered: []registry.Entry{{Name: "alpha"}}}
-	got, err := findUnregisteredSkills(wd, reg)
+	got, err := findUnregisteredSkills(wd, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
@@ -233,7 +254,7 @@ func TestFindUnregisteredSkills_WorkdirHidesUserGlobalDup(t *testing.T) {
 	}
 
 	reg := &registry.Registry{Registered: []registry.Entry{{Name: "shared"}}}
-	got, err := findUnregisteredSkills(wd, reg)
+	got, err := findUnregisteredSkills(wd, config.DefaultHarness(), reg)
 	if err != nil {
 		t.Fatalf("findUnregisteredSkills: %v", err)
 	}
