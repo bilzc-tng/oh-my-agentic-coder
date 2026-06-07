@@ -122,6 +122,7 @@ func commands() map[string]Command {
 		"config":     {Name: "config", Short: "Show resolved config + secret fingerprints for a skill.", Run: runConfig},
 		"start":      {Name: "start", Short: "Start sidecars + facade + sandbox. Optional [harness]: opencode|claude.", Run: runStart},
 		"serve":      {Name: "serve", Short: "Long-lived multi-directory server. Optional [harness]: opencode|claude.", Run: runServe},
+		"plugin":     {Name: "plugin", Short: "Install client-side harness bridge plugins (e.g. opencode-desktop).", Run: runPlugin},
 		"doctor":     {Name: "doctor", Short: "Run sanity checks.", Run: runDoctor},
 		"version":    {Name: "version", Short: "Print version.", Run: runVersion},
 	}
@@ -146,6 +147,7 @@ Subcommands:
   config       Show resolved config + secret fingerprints for a skill.
   start        Start sidecars + facade + sandbox.       [harness]: opencode|claude
   serve        Long-lived multi-directory server.        [harness]: opencode|claude
+  plugin       Install client-side bridge plugins (e.g. opencode-desktop).
   doctor       Run sanity checks.
   version      Print version.
 

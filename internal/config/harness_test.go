@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -206,5 +207,23 @@ func TestWorkdirSkillsDir(t *testing.T) {
 	}
 	if got := cc.WorkdirSkillsDir(); got != ".claude/skills" {
 		t.Errorf("claude WorkdirSkillsDir = %q, want .claude/skills", got)
+	}
+}
+
+func TestGlobalBridgeDir(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	oc, _ := LookupHarness("opencode")
+	want := filepath.Join(xdg, "opencode", "plugins")
+	if got := oc.GlobalBridgeDir(); got != want {
+		t.Errorf("opencode GlobalBridgeDir = %q, want %q", got, want)
+	}
+
+	// Claude Code's bridge dir (".claude") is its config base with no
+	// nested plugin leaf, so global bridge installation is not modeled.
+	cc, _ := LookupHarness("claude-code")
+	if got := cc.GlobalBridgeDir(); got != "" {
+		t.Errorf("claude GlobalBridgeDir = %q, want empty", got)
 	}
 }

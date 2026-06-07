@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -218,6 +219,53 @@ func (h Harness) WorkdirSkillsDir() string {
 		base = SharedSkillsBase
 	}
 	return filepath.Join("."+base, "skills")
+}
+
+// GlobalBridgeDir returns the absolute, user-global directory where this
+// harness loads bridge plugins from, mirroring BridgeDir but rooted at the
+// harness's user config dir instead of a project. For OpenCode this is
+// ~/.config/opencode/plugins (honoring $XDG_CONFIG_HOME), matching
+// OpenCode's documented global plugin location. The leaf (e.g. "plugins")
+// is taken from BridgeDir so the two stay in lockstep.
+//
+// It returns "" when the harness has no bridge directory or when no home
+// directory can be resolved.
+func (h Harness) GlobalBridgeDir() string {
+	if h.BridgeDir == "" {
+		return ""
+	}
+	base := h.SkillsBase
+	if base == "" {
+		base = SharedSkillsBase
+	}
+	// The bridge leaf is the final path element of BridgeDir
+	// (".opencode/plugins" -> "plugins", ".claude" -> ".claude"). For a
+	// single-element bridge dir that is itself the config base (Claude
+	// Code's ".claude"), there is no nested plugin leaf, so global bridge
+	// installation is not modeled; return "".
+	leaf := filepath.Base(h.BridgeDir)
+	if leaf == "."+base || leaf == base {
+		return ""
+	}
+	root := userConfigRoot()
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, base, leaf)
+}
+
+// userConfigRoot resolves the base user config directory, honoring
+// $XDG_CONFIG_HOME and falling back to $HOME/.config. It returns "" when
+// neither is available.
+func userConfigRoot() string {
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		return xdg
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config")
 }
 
 // ApplyServerLaunch ensures the inner command launches this harness's server

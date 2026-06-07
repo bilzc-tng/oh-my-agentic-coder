@@ -224,6 +224,16 @@ func runServe(args []string, env *Env) int {
 		return ExitOK
 	}
 
+	// Warn (once) when the harness's client-side bridge plugin is missing
+	// from this workdir: without it, OpenCode Desktop won't talk to the
+	// control plane and skills won't surface. The user may continue, abort,
+	// or silence the warning permanently. Aborting returns before any inner
+	// command is launched.
+	if proceed := warnPluginMissing(env, harness); !proceed {
+		fmt.Fprintln(env.Stderr, "omac serve: aborted by user (plugin not installed)")
+		return ExitOK
+	}
+
 	// Build the inner argv. serve mode runs the selected harness's *server*
 	// form: the inner executable is resolved from the profile (or --inner, or
 	// the harness default), then the harness's ServerLaunch convention is
