@@ -34,7 +34,6 @@ func runStart(args []string, env *Env) int {
 		noSandbox          = fs.Bool("no-sandbox", false, "Run inner command directly, without a sandbox (debug only).")
 		keepRunning        = fs.Bool("keep-running", false, "Do not stop sidecars when the inner command exits.")
 		acceptSkillChanges = fs.Bool("accept-skill-changes", false, "Tolerate bundle_hash drift in registered skills (proceed even if the on-disk skill differs from what was registered).")
-		updateSandbox      = fs.Bool("update-sandbox", false, "Allow the sandbox runtime (nono) to interactively persist profile/policy changes (e.g. saving override_deny paths). Off by default: omac sets NONO_NO_SAVE so a run never silently weakens the sandbox profile.")
 		verbose            = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	fs.Usage = func() {
@@ -567,18 +566,6 @@ func runStart(args []string, env *Env) int {
 	}
 	if controlOK {
 		extra["OMAC_CONTROL_BASE"] = controlURL
-	}
-	// Sandbox hardening: by default forbid the sandbox runtime from
-	// interactively persisting profile/policy changes during a run. nono's
-	// `run` offers to save the paths a denied run needed — including
-	// override_deny entries that weaken the profile — whenever a named
-	// profile is used and the child hits a policy denial on a terminal. That
-	// must be an explicit, opt-in action, never an automatic side effect of
-	// `omac start`. NONO_NO_SAVE suppresses the offer (see nono
-	// profile_save_runtime.rs). --update-sandbox re-enables it so the user
-	// can deliberately update the profile.
-	if !*updateSandbox {
-		extra["NONO_NO_SAVE"] = "1"
 	}
 
 	code, err := sandbox.ExecWithReady(argv, extra, nil)

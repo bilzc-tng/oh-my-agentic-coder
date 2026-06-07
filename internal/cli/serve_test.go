@@ -356,22 +356,6 @@ func TestRediscoverPicksUpNewSkill(t *testing.T) {
 	}
 }
 
-func TestBaseEnvInjectsNonoNoSaveByDefault(t *testing.T) {
-	s := newServeServerForTest(t)
-	s.updateSandbox = false
-	if got := s.baseEnv()["NONO_NO_SAVE"]; got != "1" {
-		t.Errorf("default baseEnv NONO_NO_SAVE = %q, want \"1\"", got)
-	}
-}
-
-func TestBaseEnvOmitsNonoNoSaveWhenUpdateSandbox(t *testing.T) {
-	s := newServeServerForTest(t)
-	s.updateSandbox = true
-	if _, present := s.baseEnv()["NONO_NO_SAVE"]; present {
-		t.Errorf("with --update-sandbox, NONO_NO_SAVE must not be set")
-	}
-}
-
 func TestCheckGlobalDriftRefusesUnregistered(t *testing.T) {
 	s := newServeServerForTest(t)
 	// Stage a global skill on disk but never register it.

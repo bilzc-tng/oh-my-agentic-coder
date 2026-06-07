@@ -462,16 +462,6 @@ profile targets. This section explains exactly what needs to be
 configured so the facade is reachable from inside a nono sandbox, with
 references to the relevant nono documentation pages.
 
-### Sandbox profile is never silently weakened
-
-When a run hits a denied path, nono can interactively offer to **save those
-paths (including `override_deny` policy exceptions) into the profile**, which
-weakens the sandbox. omac does **not** allow that to happen automatically: by
-default it sets `NONO_NO_SAVE=1` for the sandbox runtime, so a run never
-persists profile/policy changes. To deliberately update the profile, pass
-`--update-sandbox` to `omac start` / `omac serve`, which lets nono prompt as
-usual. (Requires a nono build that honors `NONO_NO_SAVE`.)
-
 ### Two transports, by design
 
 The facade binds **both** a Unix domain socket *and* a 127.0.0.1 TCP

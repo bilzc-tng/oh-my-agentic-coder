@@ -50,7 +50,6 @@ func runServe(args []string, env *Env) int {
 		innerCmdOverride = fs.String("inner", "", "Override inner_cmd's executable (default: opencode serve).")
 		noSandbox        = fs.Bool("no-sandbox", false, "Run the inner command directly, without a sandbox (debug only).")
 		noInner          = fs.Bool("no-inner", false, "Do not launch any inner command; run the control plane only (testing/headless).")
-		updateSandbox    = fs.Bool("update-sandbox", false, "Allow the sandbox runtime (nono) to interactively persist profile/policy changes. Off by default: omac sets NONO_NO_SAVE so a run never silently weakens the sandbox profile.")
 		verbose          = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	var roots multiFlag
@@ -144,7 +143,6 @@ func runServe(args []string, env *Env) int {
 	srv := &serveServer{
 		env:           env,
 		harness:       harness,
-		updateSandbox: *updateSandbox,
 		facade:        f,
 		sup:           sup,
 		ctx:           ctx,
@@ -383,7 +381,6 @@ type serveServer struct {
 	tcpPort       int
 	controlBase   string
 	acceptChanges bool
-	updateSandbox bool // allow nono to persist profile changes (default off)
 	verbose       bool
 	roots         []string // §5.4 Option B; empty = allow any directory
 
@@ -978,11 +975,6 @@ func (s *serveServer) baseEnv() map[string]string {
 		"OMAC_CONTROL_BASE":       s.controlBase,
 		"OMAC_HARNESS":            s.harness.Name,
 		"OMAC_HARNESS_SKILLS_DIR": s.harness.WorkdirSkillsDir(),
-	}
-	// Forbid nono from interactively persisting profile/policy changes unless
-	// the user opted in with --update-sandbox (see start.go for rationale).
-	if !s.updateSandbox {
-		extra["NONO_NO_SAVE"] = "1"
 	}
 	// Global skills are known at cold start (§4.5/§5.1): inject their base
 	// URLs and list their mounts in OMAC_SKILLS.
