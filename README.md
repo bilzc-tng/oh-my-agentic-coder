@@ -97,7 +97,29 @@ internal/sandbox/          Templated sandbox-runtime launcher.
 ## Build
 
 ```bash
+# Plain dev build (version reports as the default "0.1.0-dev").
 go build -o omac ./cmd/omac
+```
+
+### Release-style local build
+
+Reproduce the release binary for your current platform — stripped
+(`-s -w`), reproducible (`-trimpath`), with the version stamped in (the
+same ldflags GoReleaser uses; see `.goreleaser.yaml`):
+
+```bash
+go build -trimpath -ldflags "-s -w -X main.Version=0.1.0-local" -o omac ./cmd/omac
+./omac version   # -> omac 0.1.0-local   (note: `version` subcommand, not --version)
+```
+
+For the full multi-platform release artifacts (archives, `.deb`,
+`.pkg.tar.zst`, checksums) build with GoReleaser, no tag or publish:
+
+```bash
+brew install goreleaser
+goreleaser release --clean --snapshot --skip=publish   # output in dist/
+# current platform only:
+goreleaser build --clean --snapshot --single-target
 ```
 
 ## Test
