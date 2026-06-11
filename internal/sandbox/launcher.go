@@ -13,6 +13,9 @@
 //	{{inner_cmd}}           first element of inner argv
 //	{{inner_args}}          remaining inner argv (splats in place)
 //	{{per_skill_env_flags}} --env OMAC_<SKILL>_BASE=... flags (splats)
+//	{{self}}                absolute path of the running omac binary
+//	                        (lets the builtin profile re-exec omac as
+//	                        `omac sandbox run ...`)
 package sandbox
 
 import (
@@ -78,6 +81,10 @@ func Expand(profile config.SandboxProfile, in Inputs) ([]string, error) {
 		tmpdirFlags = []string{"--read", in.TmpDir, "--write", in.TmpDir}
 	}
 
+	self, err := os.Executable()
+	if err != nil {
+		self = "omac" // PATH fallback; better than failing the launch
+	}
 	scalar := map[string]string{
 		"socket":     in.Socket,
 		"socket_dir": filepath.Dir(in.Socket),
@@ -86,6 +93,7 @@ func Expand(profile config.SandboxProfile, in Inputs) ([]string, error) {
 		"inner_cmd":  innerCmd,
 		"tcp_port":   fmt.Sprintf("%d", in.TCPPort),
 		"tmpdir":     in.TmpDir,
+		"self":       self,
 	}
 	list := map[string][]string{
 		"inner_args":          innerArgs,
@@ -274,6 +282,19 @@ func Exec(argv []string, extraEnv map[string]string) (int, error) {
 // be wired via the caller's own defers (the caller still owns the facade
 // and supervisor).
 func ExecWithReady(argv []string, extraEnv map[string]string, onReady func()) (int, error) {
+	// Inherit host env, then overlay extras.
+	env := os.Environ()
+	for k, v := range extraEnv {
+		env = append(env, k+"="+v)
+	}
+	return ExecWithEnv(argv, env, onReady)
+}
+
+// ExecWithEnv is like ExecWithReady but takes the child environment
+// verbatim (no host-env inheritance). Used by `omac sandbox run`,
+// which builds the child env from scratch (env_clear semantics with
+// blocklist/allowlist filtering).
+func ExecWithEnv(argv []string, env []string, onReady func()) (int, error) {
 	if len(argv) == 0 {
 		return 1, fmt.Errorf("empty argv")
 	}
@@ -281,12 +302,6 @@ func ExecWithReady(argv []string, extraEnv map[string]string, onReady func()) (i
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
-	// Inherit host env, then overlay extras.
-	env := os.Environ()
-	for k, v := range extraEnv {
-		env = append(env, k+"="+v)
-	}
 	cmd.Env = env
 
 	// Place the child in its own process group. We will (a) forward signals

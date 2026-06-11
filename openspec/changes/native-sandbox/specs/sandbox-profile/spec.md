@@ -1,0 +1,68 @@
+# sandbox-profile
+
+Sandbox configuration profile format and the `omac sandbox run` CLI surface.
+
+## ADDED Requirements
+
+### Requirement: Profile file format
+The sandbox SHALL be configured by a JSON profile with the top-level sections `meta`, `workdir`, `filesystem`, `network`, and `environment`. All sections SHALL be optional. The parser MUST reject unknown fields with an error naming the offending field.
+
+The supported fields are:
+- `meta.name` (string)
+- `workdir.access` — one of `none`, `read`, `write`, `readwrite` (default `none`)
+- `filesystem.allow` (string[]) — read+write paths (directories or files)
+- `filesystem.read` (string[]) — read-only paths
+- `filesystem.write` (string[]) — write-only paths
+- `filesystem.override_deny` (string[]) — paths removed from the built-in protected-path deny set (see sandbox-process-isolation); does not grant access by itself
+- `network.mode` — one of `filtered` (default), `blocked`, `open`
+- `network.allow_domain` (string[]) — exact hostnames or `*.suffix` wildcards
+- `network.deny_domain` (string[]) — exact hostnames or `*.suffix` wildcards
+- `network.listen_port` (int[]) — TCP ports the child may bind/listen on
+- `network.allow_tcp_connect` (int[]) — TCP ports for direct outbound connect to any host
+- `network.open_port` (int[]) — localhost TCP ports allowed for both connect and bind
+- `network.network_prompt.enabled` (bool, default `true` when the object is present)
+- `network.network_prompt.prompt_timeout_secs` (int, default 60)
+- `network.network_prompt.on_unavailable` — `deny` (default) or `allow`
+- `network.enforcement` — `kernel` (default) or `env-only`
+- `environment.allow_vars` (string[]) — exact names or trailing-`*` prefixes; absent or empty means all variables pass (subject to the blocklist)
+
+#### Scenario: Valid profile is parsed
+- **WHEN** `omac sandbox run` loads a profile containing the fields above
+- **THEN** the sandbox is configured accordingly and the child process is launched
+
+#### Scenario: Unknown field is rejected
+- **WHEN** a profile contains a field not in the schema (e.g. `security.groups`)
+- **THEN** loading fails before any process is launched, with an error naming the unknown field
+
+### Requirement: Path expansion and missing paths
+Filesystem path entries SHALL support `~` expansion to the user home directory and `$VAR` / `${VAR}` environment variable expansion, evaluated in the supervisor's environment. Paths that do not exist at launch time SHALL be skipped with a printed notice rather than causing a failure.
+
+#### Scenario: Tilde path
+- **WHEN** a profile contains `"read": ["~/.gitconfig"]`
+- **THEN** the child can read `$HOME/.gitconfig` and cannot write it
+
+#### Scenario: Nonexistent path skipped
+- **WHEN** a profile grants a path that does not exist on disk
+- **THEN** launch proceeds, a notice naming the skipped path is printed, and no rule is emitted for it
+
+### Requirement: Profile resolution
+`omac sandbox run --profile <ref>` SHALL resolve `<ref>` as follows: if `<ref>` is a path (contains a path separator or ends in `.json`), load that file; otherwise load `~/.config/omac/profiles/<ref>.json` if it exists; otherwise fall back to a compiled-in profile of that name. A compiled-in profile named `default` MUST exist. If no `--profile` flag is given, `default` is used.
+
+#### Scenario: User profile overrides builtin
+- **WHEN** `~/.config/omac/profiles/default.json` exists and `omac sandbox run` is invoked without `--profile`
+- **THEN** the user file is loaded instead of the compiled-in `default`
+
+#### Scenario: Unknown profile name
+- **WHEN** `--profile nosuch` matches no file and no compiled-in profile
+- **THEN** the command exits non-zero with an error listing the search locations
+
+### Requirement: CLI flags merge additively onto the profile
+`omac sandbox run` SHALL accept the flags `--allow <path>`, `--read <path>`, `--write <path>`, `--allow-file <path>`, `--open-port <port>`, `--listen-port <port>`, `--allow-tcp-connect <port>`, `--allow-domain <domain>`, `--deny-domain <domain>`, `--block-net`, `--workdir-access <level>`, and `--profile <ref>`, each repeatable where list-valued. Flag values SHALL be merged additively into the loaded profile, except `--block-net` which sets `network.mode` to `blocked` and overrides all other network settings, and `--workdir-access` which replaces `workdir.access`. The command to run inside the sandbox follows a `--` separator.
+
+#### Scenario: Launcher-style invocation
+- **WHEN** `omac sandbox run --profile tng-sandbox --allow-file /tmp/x/bridge.sock --read /tmp/x --open-port 49152 -- opencode` is invoked
+- **THEN** the profile's grants plus the socket file, socket dir, and localhost port 49152 are all in effect for the `opencode` child
+
+#### Scenario: Block-net override
+- **WHEN** `--block-net` is passed alongside a profile with `allow_domain` entries and prompt enabled
+- **THEN** all network access except granted Unix sockets is denied, no proxy is started, and a warning states that `--block-net` overrides the profile's network settings

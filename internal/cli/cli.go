@@ -123,6 +123,7 @@ func commands() map[string]Command {
 		"start":      {Name: "start", Short: "Start sidecars + facade + sandbox. Optional [harness]: opencode|claude.", Run: runStart},
 		"serve":      {Name: "serve", Short: "Long-lived multi-directory server. Optional [harness]: opencode|claude.", Run: runServe},
 		"plugin":     {Name: "plugin", Short: "Install client-side harness bridge plugins (e.g. opencode-desktop).", Run: runPlugin},
+		"sandbox":    {Name: "sandbox", Short: "Built-in kernel sandbox (run|stage2).", Run: runSandbox},
 		"doctor":     {Name: "doctor", Short: "Run sanity checks.", Run: runDoctor},
 		"version":    {Name: "version", Short: "Print version.", Run: runVersion},
 	}
@@ -148,6 +149,7 @@ Subcommands:
   start        Start sidecars + facade + sandbox.       [harness]: opencode|claude
   serve        Long-lived multi-directory server.        [harness]: opencode|claude
   plugin       Install client-side bridge plugins (e.g. opencode-desktop).
+  sandbox      Built-in kernel sandbox: omac sandbox run [flags] -- <cmd>.
   doctor       Run sanity checks.
   version      Print version.
 

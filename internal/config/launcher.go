@@ -70,8 +70,45 @@ func defaultLauncherConfigFor(h Harness) LauncherConfig {
 	_ = h // inner_cmd is supplied by the harness at resolve time, not baked here
 	return LauncherConfig{
 		Sandbox: SandboxConfig{
-			DefaultProfile: "nono",
+			DefaultProfile: "builtin",
 			Profiles: map[string]SandboxProfile{
+				// builtin re-execs the running omac binary as
+				// `omac sandbox run` — the native replacement for nono
+				// (Seatbelt on macOS, bubblewrap+Landlock on Linux).
+				// Flag semantics intentionally mirror the nono profile
+				// below so the two stay drop-in interchangeable:
+				//
+				//   --allow-file <socket>   AF_UNIX bridge socket (the
+				//                           generated Seatbelt profile
+				//                           allows connect explicitly,
+				//                           so unlike nono this works
+				//                           on macOS even under the
+				//                           network deny)
+				//   --read <socket-dir>     path-component lookup
+				//   {{tmpdir_flags}}        rw on the TMPDIR temp dir
+				//   --open-port <tcp-port>  loopback facade transport
+				//
+				// The sandbox profile itself (fs grants, listen_port,
+				// allow_tcp_connect, network prompt) is resolved by
+				// `omac sandbox run --profile default`: user override at
+				// ~/.config/omac/profiles/default.json, else compiled-in
+				// defaults equivalent to nono's tng-sandbox profile.
+				"builtin": {
+					Command: []string{
+						"{{self}}", "sandbox", "run",
+						"--profile", "default",
+						"--allow-file", "{{socket}}",
+						"--read", "{{socket_dir}}",
+						"{{tmpdir_flags}}",
+						"--open-port", "{{tcp_port}}",
+						"--",
+						"{{inner_cmd}}", "{{inner_args}}",
+					},
+					// Empty: filled by the selected harness at launch.
+					InnerCmd: nil,
+				},
+				// Retained for transition: select with
+				// `omac start --sandbox-profile nono` or via config.
 				"nono": {
 					// Reference invocation for nono (https://nono.sh).
 					//

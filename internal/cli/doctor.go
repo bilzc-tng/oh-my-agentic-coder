@@ -9,8 +9,10 @@ import (
 
 	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/keychain"
+	"github.com/tngtech/oh-my-agentic-coder/internal/netprompt"
 	"github.com/tngtech/oh-my-agentic-coder/internal/osinfo"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
+	"github.com/tngtech/oh-my-agentic-coder/internal/sandboxrun"
 )
 
 func runDoctor(args []string, env *Env) int {
@@ -117,7 +119,10 @@ func runDoctor(args []string, env *Env) int {
 	profName := lc.Sandbox.DefaultProfile
 	if prof, ok := lc.Sandbox.Profiles[profName]; ok && len(prof.Command) > 0 {
 		head := prof.Command[0]
-		if _, err := exec.LookPath(head); err != nil {
+		if head == "{{self}}" {
+			fmt.Fprintf(env.Stdout, "[ok] sandbox profile %q uses the built-in sandbox\n", profName)
+			doctorBuiltinSandbox(env)
+		} else if _, err := exec.LookPath(head); err != nil {
 			fmt.Fprintf(env.Stdout, "[warn] sandbox profile %q head %q not on $PATH\n", profName, head)
 		} else {
 			fmt.Fprintf(env.Stdout, "[ok] sandbox profile %q head %q found\n", profName, head)
@@ -128,4 +133,23 @@ func runDoctor(args []string, env *Env) int {
 		return ExitConfigInvalid
 	}
 	return ExitOK
+}
+
+// doctorBuiltinSandbox reports the platform prerequisites of the
+// built-in sandbox: kernel backend availability (hard requirement) and
+// dialog backend availability for the network prompt (warning only).
+func doctorBuiltinSandbox(env *Env) {
+	if err := sandboxrun.CheckPlatform(); err != nil {
+		fmt.Fprintf(env.Stdout, "[fail] built-in sandbox: %v\n", err)
+	} else {
+		fmt.Fprintln(env.Stdout, "[ok] built-in sandbox: kernel backend available")
+	}
+	for _, line := range sandboxrun.DoctorNotes() {
+		fmt.Fprintln(env.Stdout, line)
+	}
+	if _, available := netprompt.NewPrompter(1, nil); available {
+		fmt.Fprintln(env.Stdout, "[ok] network prompt: dialog backend available")
+	} else {
+		fmt.Fprintln(env.Stdout, "[warn] network prompt: no dialog backend (osascript/zenity/kdialog); prompts fall back to the on_unavailable policy (default: deny)")
+	}
 }
