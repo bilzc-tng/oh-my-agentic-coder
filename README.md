@@ -170,6 +170,112 @@ go install github.com/tngtech/oh-my-agentic-coder/cmd/omac@latest
 For the project layout, build instructions (dev and release), and test
 details, see [`docs/DEVELOP.md`](docs/DEVELOP.md).
 
+### Configuration
+
+omac uses several configuration files. None are required — compiled-in
+defaults work out of the box — but you can override them as needed.
+
+#### Launcher config
+
+`oh-my-agentic-coder.yaml` controls sandbox profiles and facade tuning.
+omac looks for it in two locations (first found wins):
+
+| Layer | Path |
+|---|---|
+| Workdir-local | `<workdir>/.opencode/oh-my-agentic-coder.yaml` |
+| User-global | `~/.config/omac/config.yaml` (`$XDG_CONFIG_HOME` honored) |
+
+If neither file exists, `DefaultLauncherConfig()` is used (profile
+`builtin`, 300 s idle timeout, 10 MB max body).
+
+```yaml
+sandbox:
+  default_profile: builtin          # or nono, nono-netprofile, no-sandbox-debug
+  profiles: { }                     # override or add profiles; defaults are merged
+facade:
+  idle_timeout_secs: 300
+  max_body_bytes: 10485760
+  base_env_passthrough: [PATH, HOME, USER, LANG, LC_ALL, LC_CTYPE, TMPDIR]
+```
+
+#### Skill registry
+
+`sidecar.json` records which skills are registered (name, directory,
+bundle hash, declared secrets). It lives in two layers, merged at
+startup with workdir winning on collision:
+
+| Layer | Path |
+|---|---|
+| Workdir-local | `<workdir>/.opencode/sidecar.json` |
+| User-global | `~/.config/omac/sidecar.json` |
+
+Written by `omac register` / `omac deregister`; read by `omac start`,
+`omac list`, `omac doctor`. **Not mounted into the sandbox.**
+
+#### Skill config
+
+`skill-config.yaml` stores non-secret per-skill fields (API base URLs,
+region names, feature flags — anything safe to commit). Same two-layer
+merge as the registry:
+
+| Layer | Path |
+|---|---|
+| Workdir-local | `<workdir>/.opencode/skill-config.yaml` |
+| User-global | `~/.config/omac/skill-config.yaml` |
+
+Written by `omac register` (prompts for fields) and `omac config`;
+read by `omac start` to inject field values into sidecar env vars.
+**Not mounted into the sandbox** — resolved values are passed as
+environment variables.
+
+#### Sandbox profiles
+
+The built-in sandbox reads JSON profiles from
+`~/.config/omac/sandbox-profiles/`. On first `omac start` with the
+`builtin` profile, omac scaffolds `default.json` from the compiled-in
+defaults so you can edit it:
+
+```
+~/.config/omac/sandbox-profiles/
+├── default.json              # filesystem grants, network mode, protected paths
+└── default.pages.json        # learned allow/deny decisions (network prompts)
+```
+
+Profile fields: `workdir.access` (none/read/write/readwrite),
+`filesystem.allow` / `.read` / `.write` (path grants, `~` and `$VAR`
+expansion), `filesystem.override_deny` (punch holes in the
+built-in protected-path list), `network.mode`
+(filtered/blocked/open), `network.network_prompt`, and
+`environment.allow_vars`. See the scaffolded `default.json` for the
+full schema.
+
+#### Secrets
+
+Secrets (API keys, tokens) are stored in the **OS keychain**
+(Keychain on macOS, Secret Service / D-Bus on Linux, Credential
+Manager on Windows) — never on disk. Managed via `omac secrets`.
+**Never reachable inside the sandbox.**
+
+#### What the sandbox can see
+
+The sandbox receives resolved **values** (env vars, socket paths), not
+config files. Only these paths from the host are accessible inside the
+sandbox:
+
+| Path | Access | Source |
+|---|---|---|
+| `<workdir>` | read+write | `workdir.access: readwrite` (default) |
+| `~/.local/share/opencode`, `~/.local/state/opencode` | read+write | default profile `filesystem.allow` |
+| `~/.claude` | read+write | default profile `filesystem.allow` |
+| `~/.cache`, `~/Library/Caches` | read+write | default profile `filesystem.allow` |
+| `~/go`, `~/.rustup`, `~/.cargo` | read+write | default profile `filesystem.allow` |
+| `~/.config/opencode`, `~/.opencode/bin` | read-only | default profile `filesystem.read` |
+| `~/.nvm`, `~/.gitconfig`, `~/.gitignore_global`, `~/.claude.json` | read-only | default profile `filesystem.read` |
+| `/usr`, `/bin`, `/lib`, `/etc`, … | read-only | platform baseline |
+| `/tmp`, `$TMPDIR` | read+write | platform baseline + per-session TMPDIR |
+| Bridge socket (`$TMPDIR/omac-<hash>/bridge.sock`) | read+write | `--allow-file` / `--read` flags |
+| Paths in `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.kube`, … | **denied** | protected paths (override with `filesystem.override_deny`) |
+
 ## Typical workflow
 
 ```bash
