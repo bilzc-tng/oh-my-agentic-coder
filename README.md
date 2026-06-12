@@ -590,3 +590,11 @@ See the design doc's "Open questions / future work" section. Notably:
 - `doctor --fix` auto-remediation.
 - `OMAC_KEYRING_BACKEND` override.
 - Signed skill metadata verification.
+
+## License
+
+Copyright 2026 TNG Technology Consulting GmbH
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and
+[NOTICE](NOTICE) for details. You may obtain a copy of the License at
+<http://www.apache.org/licenses/LICENSE-2.0>.

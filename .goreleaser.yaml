@@ -48,6 +48,7 @@ archives:
     files:
       - README.md
       - LICENSE*
+      - NOTICE
 
 # Linux packages: .deb (apt/Debian/Ubuntu) and .pkg.tar.zst (pacman/Arch).
 # Both are attached to the GitHub release; users download and install with
