@@ -2,13 +2,26 @@
 
 package sandboxrun
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/tngtech/oh-my-agentic-coder/internal/sandboxprofile"
+)
 
 // DoctorNotes returns extra platform diagnostics for `omac doctor`.
 func DoctorNotes() []string {
 	abi := LandlockABI()
 	if abi >= landlockNetABI {
 		return []string{fmt.Sprintf("[ok] Landlock ABI %d (network rules supported)", abi)}
+	}
+	envOnlyActive := false
+	if p, _, err := sandboxprofile.Resolve(""); err == nil {
+		envOnlyActive = p.Network.EffectiveEnforcement() == sandboxprofile.EnforceEnvOnly
+	}
+	if envOnlyActive {
+		return []string{fmt.Sprintf(
+			"[warn] Landlock ABI %d < %d (kernel < 6.7): network.enforcement is already \"env-only\" — advisory filtering active",
+			abi, landlockNetABI)}
 	}
 	return []string{
 		fmt.Sprintf(
