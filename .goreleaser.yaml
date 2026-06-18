@@ -50,9 +50,11 @@ archives:
       - LICENSE*
       - NOTICE
 
-# Linux packages: .deb (apt/Debian/Ubuntu) and .pkg.tar.zst (pacman/Arch).
-# Both are attached to the GitHub release; users download and install with
-# `sudo dpkg -i ...` or `sudo pacman -U ...` respectively.
+# Linux packages: .deb (apt/Debian/Ubuntu), .rpm (Fedora/RHEL/openSUSE),
+# .apk (Alpine), and .pkg.tar.zst (pacman/Arch).
+# All are attached to the GitHub release; users download and install with
+# `sudo dpkg -i ...`, `sudo rpm -i ...`, `sudo apk add --allow-untrusted ...`,
+# or `sudo pacman -U ...` respectively.
 nfpms:
   - id: linux-packages
     package_name: oh-my-agentic-coder
@@ -67,6 +69,8 @@ nfpms:
     license: Apache-2.0
     formats:
       - deb
+      - rpm
+      - apk
       - archlinux
     bindir: /usr/bin
     file_name_template: >-
@@ -158,4 +162,4 @@ release:
     ---
     See the [README](https://github.com/TNG/oh-my-agentic-coder#installation)
     for installation instructions on macOS (Homebrew), Debian/Ubuntu (apt),
-    and Arch Linux (pacman).
+    Fedora/RHEL/openSUSE (rpm), Alpine (apk), and Arch Linux (pacman).
