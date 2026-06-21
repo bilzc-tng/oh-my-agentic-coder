@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/tngtech/oh-my-agentic-coder/internal/sandboxprofile"
@@ -21,10 +22,101 @@ func CheckPlatform() error {
 		return fmt.Errorf("bubblewrap (bwrap) not found on PATH — install it with your package manager (e.g. apt install bubblewrap / dnf install bubblewrap): %w", err)
 	}
 	smoke := exec.Command("bwrap", "--ro-bind", "/", "/", "true")
-	if out, err := smoke.CombinedOutput(); err != nil {
-		return fmt.Errorf("bwrap is installed but not functional (user namespaces disabled?): %v — %s", err, firstLine(out))
+	out, err := smoke.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", usernsDiagnosis(err, firstLine(out)))
 	}
 	return nil
+}
+
+// procUint reads a sysctl-style /proc file expected to hold a single
+// integer and returns (value, true) on success. Missing files or
+// unparseable contents yield (0, false) — the feature is simply absent.
+func procUint(path string) (int, bool) {
+	data, rerr := os.ReadFile(path)
+	if rerr != nil {
+		return 0, false
+	}
+	n, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+	if perr != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// usernsDiagnosis turns a failed bwrap smoke test into an actionable
+// message, reading the live /proc knobs to pick the right cause/fix.
+func usernsDiagnosis(runErr error, firstOutLine string) string {
+	apparmor, apparmorKnown := procUint("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+	clone, cloneKnown := procUint("/proc/sys/kernel/unprivileged_userns_clone")
+	return formatUsernsDiagnosis(usernsState{
+		runErr:        runErr,
+		firstOutLine:  firstOutLine,
+		apparmor:      apparmor,
+		apparmorKnown: apparmorKnown,
+		clone:         clone,
+		cloneKnown:    cloneKnown,
+	})
+}
+
+// usernsState carries the inputs to the diagnosis so the message
+// formatting is pure and unit-testable without touching real /proc.
+type usernsState struct {
+	runErr        error
+	firstOutLine  string
+	apparmor      int  // value of apparmor_restrict_unprivileged_userns
+	apparmorKnown bool // whether that proc file existed/parsed
+	clone         int  // value of unprivileged_userns_clone
+	cloneKnown    bool // whether that proc file existed/parsed
+}
+
+func formatUsernsDiagnosis(s usernsState) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "bwrap is installed but not functional (unprivileged user namespaces blocked?): %v", s.runErr)
+	if s.firstOutLine != "" {
+		fmt.Fprintf(&b, " — %s", s.firstOutLine)
+	}
+
+	switch {
+	// Ubuntu 23.10+/24.04: AppArmor restricts unprivileged userns for
+	// any unconfined binary (bwrap has no shipped profile) unless its
+	// profile carries `userns create`. Enabled by default on 24.04.
+	case s.apparmorKnown && s.apparmor == 1:
+		b.WriteString(
+			"\n\nCause: AppArmor is restricting unprivileged user namespaces " +
+				"(kernel.apparmor_restrict_unprivileged_userns=1), the default on Ubuntu 24.04+.\n" +
+				"bwrap has no AppArmor profile, so it is denied the user namespace it needs.\n" +
+				"Fix A (preferred — keeps the protection for every other program): grant just bwrap\n" +
+				"the permission. Create /etc/apparmor.d/bwrap with:\n" +
+				"    abi <abi/4.0>,\n" +
+				"    /usr/bin/bwrap flags=(unconfined) {\n" +
+				"      userns,\n" +
+				"    }\n" +
+				"then load it:\n" +
+				"    sudo apparmor_parser -r /etc/apparmor.d/bwrap\n" +
+				"Fix B (system-wide, weaker — reverts to pre-23.10 behaviour):\n" +
+				"    sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n" +
+				"  make it persist across reboots:\n" +
+				"    echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/60-apparmor-namespace.conf")
+
+	// Distro kernels with the all-or-nothing switch (Debian/older
+	// Ubuntu/Arch): unprivileged userns disabled entirely.
+	case s.cloneKnown && s.clone == 0:
+		b.WriteString(
+			"\n\nCause: unprivileged user namespaces are disabled system-wide " +
+				"(kernel.unprivileged_userns_clone=0).\n" +
+				"Fix: sudo sysctl -w kernel.unprivileged_userns_clone=1\n" +
+				"  persist: echo 'kernel.unprivileged_userns_clone=1' | sudo tee /etc/sysctl.d/60-userns.conf")
+
+	// No recognised knob: likely a container without userns, a hardening
+	// sysctl, or seccomp policy. Keep the generic hint.
+	default:
+		b.WriteString(
+			"\n\nThis usually means unprivileged user namespaces are unavailable here " +
+				"(restricted by AppArmor/sysctl, or running in a container that disallows them).\n" +
+				"On Ubuntu 24.04+ check: cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns")
+	}
+	return b.String()
 }
 
 // kernelVersionString returns the running kernel version string from
