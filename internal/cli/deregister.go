@@ -1,15 +1,18 @@
 package cli
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/tngtech/oh-my-agentic-coder/internal/config"
 	"github.com/tngtech/oh-my-agentic-coder/internal/keychain"
 	"github.com/tngtech/oh-my-agentic-coder/internal/registry"
+	"github.com/tngtech/oh-my-agentic-coder/internal/skillsource"
 )
 
 func runDeregister(args []string, env *Env) int {
@@ -22,10 +25,14 @@ func runDeregister(args []string, env *Env) int {
 		harnessName   = fs.String("harness", "", "Deregister only the entry for this harness (opencode|claude). Default: the first matching entry. Use when a skill name is registered under multiple harnesses.")
 		globalOnly    = fs.Bool("global", false, "Force deregistration from the user-global registry (~/.config/omac), not the workdir layer.")
 		prune         = fs.Bool("prune", false, "Remove every stale registration (workdir + global) whose skill directory no longer exists. Ignores the <skill> argument.")
+		assumeYes     = fs.Bool("yes", false, "Do not prompt before deleting an unregistered skill's source directory.")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: omac deregister <skill> [--global] [--harness <name>] [--purge-secrets] [--purge-fields] [--purge-defaults]")
+		fmt.Fprintln(env.Stderr, "Usage: omac deregister <skill> [--global] [--harness <name>] [--yes] [--purge-secrets] [--purge-fields] [--purge-defaults]")
 		fmt.Fprintln(env.Stderr, "       omac deregister --prune   # remove all stale registrations")
+		fmt.Fprintln(env.Stderr, "\nRemoves the skill from the registry. If the skill was never registered but")
+		fmt.Fprintln(env.Stderr, "still exists on disk (so `omac start` keeps flagging it), its source directory")
+		fmt.Fprintln(env.Stderr, "is deleted instead (after confirmation, or immediately with --yes).")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(reorderFlagsFirst(args)); err != nil {
@@ -124,7 +131,23 @@ func runDeregister(args []string, env *Env) int {
 	} else if existed {
 		fmt.Fprintf(env.Stdout, "[ok] deregistered %s; kept %d secret(s) in keychain (use --purge-secrets to remove)", name, len(declared))
 	} else {
-		fmt.Fprintf(env.Stdout, "[noop] %s was not registered", name)
+		// Not in the registry. The skill may still exist on disk as a
+		// discovered-but-unregistered skill (omac start refuses to run
+		// with those). `omac deregister <skill>` should still get rid of
+		// it: locate its source directory and remove it. This is
+		// destructive, so confirm unless --yes / a non-interactive
+		// stdin says otherwise.
+		if removed, dir, derr := deleteUnregisteredSource(env, name, harnessKey, *assumeYes); derr != nil {
+			fmt.Fprintln(env.Stderr, "\nomac deregister:", derr)
+			return ExitIOError
+		} else if removed {
+			fmt.Fprintf(env.Stdout, "[ok] deleted unregistered skill %s (removed %s)", name, dir)
+		} else if dir != "" {
+			// Found on disk but the user declined.
+			fmt.Fprintf(env.Stdout, "[noop] %s left in place at %s", name, dir)
+		} else {
+			fmt.Fprintf(env.Stdout, "[noop] %s was not registered and no skill of that name was found on disk", name)
+		}
 	}
 	if *purgeFields {
 		fmt.Fprintf(env.Stdout, "; deleted %d config field(s)", removedFields)
@@ -167,6 +190,50 @@ func runDeregister(args []string, env *Env) int {
 		}
 	}
 	return ExitOK
+}
+
+// deleteUnregisteredSource handles `omac deregister <skill>` when the
+// skill has no registry entry but still exists on disk as a discovered
+// skill (which is exactly what makes `omac start` refuse to run). It
+// locates the skill's source directory and deletes it.
+//
+// Returns (removed, dir, err): removed is true when the directory was
+// deleted; dir is the source directory found (empty when no skill of
+// that name exists on disk); a non-nil err is an I/O failure.
+//
+// harnessKey scopes discovery when the caller passed --harness; empty
+// means search every harness's scope so `omac deregister <skill>`
+// works without the user having to remember which harness owns it.
+func deleteUnregisteredSource(env *Env, name, harnessKey string, assumeYes bool) (bool, string, error) {
+	harnesses := config.AllHarnesses()
+	if harnessKey != "" {
+		if h, ok := config.LookupHarness(harnessKey); ok {
+			harnesses = []config.Harness{h}
+		}
+	}
+	dir := ""
+	for _, h := range harnesses {
+		if d, _, err := skillsource.Resolve(env.Workdir, h, name); err == nil {
+			dir = d
+			break
+		}
+	}
+	if dir == "" {
+		return false, "", nil
+	}
+	if !assumeYes {
+		fmt.Fprintf(env.Stdout, "%s is not registered but exists on disk at:\n  %s\nDelete this directory? [y/N] ", name, dir)
+		reader := bufio.NewReader(env.Stdin)
+		answer, _ := reader.ReadString('\n')
+		answer = strings.ToLower(strings.TrimSpace(answer))
+		if answer != "y" && answer != "yes" {
+			return false, dir, nil
+		}
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return false, dir, fmt.Errorf("delete %s: %w", dir, err)
+	}
+	return true, dir, nil
 }
 
 // runDeregisterPrune removes every registry entry, in both the workdir

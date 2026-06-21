@@ -138,6 +138,75 @@ func TestDeregisterPruneRemovesStale(t *testing.T) {
 	}
 }
 
+// stageUnregisteredSkill creates a workdir skill dir with omac.yaml but
+// NO registry entry (the discovered-but-unregistered case).
+func stageUnregisteredSkill(t *testing.T, workdir, name string) string {
+	t.Helper()
+	skillDir := filepath.Join(workdir, ".opencode", "skills", name)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := "name: " + name + "\ntype: skill\nversion: 0.1.0\ndescription: d\n" +
+		"sidecar:\n  command: [\"python3\", \"s.py\"]\n  mount: " + name + "\n  health: {path: /status}\n  protocols: [\"http\"]\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "omac.yaml"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return skillDir
+}
+
+func TestDeregisterDeletesUnregisteredOnDiskSkill(t *testing.T) {
+	isolateHome(t)
+	wd := t.TempDir()
+	dir := stageUnregisteredSkill(t, wd, "apple-calendar")
+
+	// --yes so the deletion runs without an interactive prompt.
+	env, read := captureEnv(t, wd)
+	if code := runDeregister([]string{"--yes", "apple-calendar"}, env); code != ExitOK {
+		t.Fatalf("deregister code = %d", code)
+	}
+	out, _ := read()
+	if !strings.Contains(out, "deleted unregistered skill apple-calendar") {
+		t.Errorf("output = %q", out)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("source dir should be gone, stat err = %v", err)
+	}
+}
+
+func TestDeregisterKeepsRegisteredSkillFiles(t *testing.T) {
+	isolateHome(t)
+	wd := t.TempDir()
+	stageRegisteredSkill(t, wd, "keepme")
+	dir := filepath.Join(wd, ".opencode", "skills", "keepme")
+
+	env, read := captureEnv(t, wd)
+	if code := runDeregister([]string{"keepme"}, env); code != ExitOK {
+		t.Fatalf("deregister code = %d", code)
+	}
+	out, _ := read()
+	if !strings.Contains(out, "deregistered keepme") {
+		t.Errorf("output = %q", out)
+	}
+	// A registered skill is removed from the registry only; its files
+	// must survive (deleting source is reserved for unregistered ones).
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("registered skill's files must be kept, stat err = %v", err)
+	}
+}
+
+func TestDeregisterUnknownSkillNoop(t *testing.T) {
+	isolateHome(t)
+	wd := t.TempDir()
+	env, read := captureEnv(t, wd)
+	if code := runDeregister([]string{"--yes", "ghost"}, env); code != ExitOK {
+		t.Fatalf("deregister code = %d", code)
+	}
+	out, _ := read()
+	if !strings.Contains(out, "was not registered and no skill of that name was found") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 func TestDeregisterGlobalRemovesStaleGlobalEntry(t *testing.T) {
 	isolateHome(t)
 	wd := t.TempDir()

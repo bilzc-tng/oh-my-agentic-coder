@@ -386,10 +386,16 @@ omac [--workdir <dir>] <subcommand> [flags] [args]
                  --no-fields             skip all config-field prompts
                  --fields-from <file>    KEY=VALUE file for fields
 
-  deregister   Remove a skill from the registry. Flags:
+  deregister   Remove a skill. If it is registered, the registry entry is
+               removed (its source files are kept). If it was never
+               registered but still exists on disk (so `omac start` keeps
+               flagging it), its source directory is deleted instead — after
+               a confirmation prompt, or immediately with --yes. Flags:
                  --global                force removal from the user-global
                                          registry (~/.config/omac)
                  --harness <name>        remove only one harness's entry
+                 --yes                   delete an unregistered skill's source
+                                         directory without prompting
                  --purge-secrets         also delete from keychain
                  --purge-fields          also delete from skill-config.yaml
                  --purge-defaults        also delete remembered global defaults
