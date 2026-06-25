@@ -25,8 +25,36 @@ import (
 	"github.com/tngtech/oh-my-agentic-coder/internal/supervisor"
 )
 
-func runStart(args []string, env *Env) int {
-	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+// launchOpts carries everything runLaunch needs: the resolved harness, the
+// parsed start-family flags, and the inner args to append to the resolved
+// inner command. `omac start`, `omac continue`, and `omac resume` all build
+// one of these and call runLaunch, so the launch pipeline has a single
+// implementation.
+type launchOpts struct {
+	// label is the invoking subcommand name ("start", "continue", "resume").
+	// runLaunch uses it to prefix diagnostics so a failure surfaced via
+	// `omac continue`/`omac resume` is not mislabeled as `omac start:`.
+	label              string
+	harness            config.Harness
+	profile            string
+	innerCmdOverride   string
+	noSandbox          bool
+	keepRunning        bool
+	acceptSkillChanges bool
+	skipSecretPattern  bool
+	verbose            bool
+	// innerArgs are appended to the resolved inner command (user-supplied
+	// trailing `-- args` plus any command-specific flags like --continue).
+	innerArgs []string
+}
+
+// parseLaunchArgs parses the shared start-family command line: an optional
+// leading positional harness token, the start flags, and trailing `-- inner
+// args`. cmdName is used in usage/error text (e.g. "start", "continue"). It
+// returns the assembled opts and true on success; on a parse/usage error it
+// prints to stderr and returns false (callers map that to ExitMisuse).
+func parseLaunchArgs(cmdName string, args []string, env *Env) (launchOpts, bool) {
+	fs := flag.NewFlagSet(cmdName, flag.ContinueOnError)
 	fs.SetOutput(env.Stderr)
 	var (
 		profile            = fs.String("sandbox", "", "Name of a sandbox profile from the launcher config.")
@@ -38,7 +66,7 @@ func runStart(args []string, env *Env) int {
 		verbose            = fs.Bool("verbose", false, "Verbose lifecycle logging.")
 	)
 	fs.Usage = func() {
-		fmt.Fprintln(env.Stderr, "Usage: omac start [harness] [flags] [-- inner args...]")
+		fmt.Fprintf(env.Stderr, "Usage: omac %s [harness] [flags] [-- inner args...]\n", cmdName)
 		fmt.Fprintf(env.Stderr, "\nharness: one of %s (default: %s)\n\n",
 			strings.Join(config.HarnessNames(), ", "), config.DefaultHarness().Name)
 		fs.PrintDefaults()
@@ -62,30 +90,73 @@ func runStart(args []string, env *Env) int {
 	// flags (+ any non-flag positionals, which become inner args).
 	harness, ourArgs, err := splitHarnessToken(ourArgs)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start:", err)
-		return ExitMisuse
+		fmt.Fprintf(env.Stderr, "omac %s: %v\n", cmdName, err)
+		return launchOpts{}, false
 	}
 	if err := fs.Parse(reorderFlagsFirst(ourArgs)); err != nil {
-		return ExitMisuse
+		return launchOpts{}, false
 	}
 	innerArgs = append(fs.Args(), innerArgs...)
+	return launchOpts{
+		label:              cmdName,
+		harness:            harness,
+		profile:            *profile,
+		innerCmdOverride:   *innerCmdOverride,
+		noSandbox:          *noSandbox,
+		keepRunning:        *keepRunning,
+		acceptSkillChanges: *acceptSkillChanges,
+		skipSecretPattern:  *skipSecretPattern,
+		verbose:            *verbose,
+		innerArgs:          innerArgs,
+	}, true
+}
+
+func runStart(args []string, env *Env) int {
+	opts, ok := parseLaunchArgs("start", args, env)
+	if !ok {
+		return ExitMisuse
+	}
+	return runLaunch(env, opts)
+}
+
+// runLaunch is the shared start pipeline: load config, reconcile the registry,
+// spawn sidecars + facade + control plane, build the sandbox argv, and exec
+// the inner command. It is invoked by `start`, `continue`, and `resume`.
+func runLaunch(env *Env, opts launchOpts) int {
+	harness := opts.harness
+	profile := opts.profile
+	innerCmdOverride := opts.innerCmdOverride
+	noSandbox := opts.noSandbox
+	keepRunning := opts.keepRunning
+	acceptSkillChanges := opts.acceptSkillChanges
+	skipSecretPattern := opts.skipSecretPattern
+	verbose := opts.verbose
+	innerArgs := opts.innerArgs
+
+	// Diagnostics are prefixed with the invoking subcommand so a failure
+	// surfaced through `omac continue`/`omac resume` is not mislabeled.
+	label := opts.label
+	if label == "" {
+		label = "start"
+	}
+	prefix := "omac " + label
 
 	// 1. Load launcher config.
 	lc, cfgPath, err := config.LoadLauncher(env.Workdir)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: launcher config:", err)
+		fmt.Fprintln(env.Stderr, prefix+": launcher config:", err)
 		return ExitConfigInvalid
 	}
-	if *verbose && cfgPath != "" {
+	if verbose && cfgPath != "" {
 		fmt.Fprintf(env.Stderr, "[verbose] loaded launcher config: %s\n", cfgPath)
 	}
-	profName := *profile
+	profName := profile
 	if profName == "" {
 		profName = lc.Sandbox.DefaultProfile
 	}
 	prof, ok := lc.Sandbox.Profiles[profName]
-	if !ok && !*noSandbox {
-		fmt.Fprintf(env.Stderr, "omac start: unknown sandbox profile %q\n", profName)
+	if !ok && !noSandbox {
+		fmt.Fprintf(env.Stderr, prefix+": unknown sandbox profile %q\n", profName)
 		return ExitConfigInvalid
 	}
 
@@ -111,12 +182,12 @@ func runStart(args []string, env *Env) int {
 	// on the workdir layer only — see autoDeregisterMissing.
 	workdirReg, err := registry.Load(env.Workdir)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: registry:", err)
+		fmt.Fprintln(env.Stderr, prefix+": registry:", err)
 		return ExitIOError
 	}
 	globalReg, err := registry.LoadGlobal()
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: global registry:", err)
+		fmt.Fprintln(env.Stderr, prefix+": global registry:", err)
 		return ExitIOError
 	}
 
@@ -129,12 +200,12 @@ func runStart(args []string, env *Env) int {
 	//     purge them later.
 	pruned, err := autoDeregisterMissing(env, workdirReg, false)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: auto-deregister:", err)
+		fmt.Fprintln(env.Stderr, prefix+": auto-deregister:", err)
 		return ExitIOError
 	}
 	globalPruned, err := autoDeregisterMissing(env, globalReg, true)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: auto-deregister (global):", err)
+		fmt.Fprintln(env.Stderr, prefix+": auto-deregister (global):", err)
 		return ExitIOError
 	}
 	for _, p := range append(pruned, globalPruned...) {
@@ -167,11 +238,11 @@ func runStart(args []string, env *Env) int {
 	//     keychain seeding, etc. don't get silently skipped).
 	unregistered, err := findUnregisteredSkills(env.Workdir, harness, reg)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: scan skills:", err)
+		fmt.Fprintln(env.Stderr, prefix+": scan skills:", err)
 		return ExitIOError
 	}
 	if len(unregistered) > 0 {
-		fmt.Fprintln(env.Stderr, "omac start: unregistered skills found in this workdir:")
+		fmt.Fprintln(env.Stderr, prefix+": unregistered skills found in this workdir:")
 		for _, name := range unregistered {
 			fmt.Fprintf(env.Stderr, "  %s — register with: omac register %s\n", name, name)
 		}
@@ -181,7 +252,7 @@ func runStart(args []string, env *Env) int {
 
 	if len(reg.Registered) == 0 {
 		fmt.Fprintln(env.Stderr,
-			"omac start: no skills registered in this workdir; "+
+			prefix+": no skills registered in this workdir; "+
 				"starting sandbox without sidecars (run `omac register` to add some)")
 	}
 
@@ -223,12 +294,12 @@ func runStart(args []string, env *Env) int {
 
 	workdirCfg, err := skillconfig.Load(env.Workdir)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: skill-config:", err)
+		fmt.Fprintln(env.Stderr, prefix+": skill-config:", err)
 		return ExitIOError
 	}
 	globalCfg, err := skillconfig.LoadGlobal()
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: global skill-config:", err)
+		fmt.Fprintln(env.Stderr, prefix+": global skill-config:", err)
 		return ExitIOError
 	}
 	// Merge config the same way as the registry: workdir values
@@ -273,13 +344,13 @@ func runStart(args []string, env *Env) int {
 
 		// Bundle hash. Excluded from scanning when the user has
 		// explicitly opted in to drift via --accept-skill-changes.
-		if !*acceptSkillChanges {
+		if !acceptSkillChanges {
 			bundle, err := config.BundleHash(absDir)
 			if err != nil {
 				// I/O errors during hashing are class-level (we can't
 				// produce useful per-skill diagnostics if the directory
 				// is unreadable). Abort immediately.
-				fmt.Fprintln(env.Stderr, "omac start: bundle hash:", err)
+				fmt.Fprintln(env.Stderr, prefix+": bundle hash:", err)
 				return ExitIOError
 			}
 			if bundle != e.BundleHash {
@@ -320,7 +391,7 @@ func runStart(args []string, env *Env) int {
 					// is the escape hatch for a stale pattern: the raw value
 					// is still passed through, just not vetted here.
 					if envVal, ok := secretFromEnv(spec.Name, envPassthrough); ok {
-						if !*skipSecretPattern {
+						if !skipSecretPattern {
 							if perr := validatePattern(spec, envVal); perr != nil {
 								invalidSecrets = append(invalidSecrets,
 									invalidSecretProblem{skill: e.Name, secret: spec.Name, reason: perr.Error()})
@@ -337,7 +408,7 @@ func runStart(args []string, env *Env) int {
 				// Keychain I/O failure is class-level (likely auth
 				// rejection on macOS); the user fixes it once and
 				// retries. No point continuing.
-				fmt.Fprintln(env.Stderr, "omac start: keychain:", err)
+				fmt.Fprintln(env.Stderr, prefix+": keychain:", err)
 				return ExitKeychainError
 			}
 			secMap[spec.Name] = val
@@ -383,7 +454,7 @@ func runStart(args []string, env *Env) int {
 	// (grouped by problem class) and abort.
 	if len(bundleDrifts) > 0 || len(missingSecrets) > 0 || len(invalidSecrets) > 0 || len(missingFields) > 0 || len(metaProblems) > 0 {
 		total := len(bundleDrifts) + len(missingSecrets) + len(invalidSecrets) + len(missingFields) + len(metaProblems)
-		fmt.Fprintf(env.Stderr, "omac start: refusing to start, found %d problem(s):\n", total)
+		fmt.Fprintf(env.Stderr, prefix+": refusing to start, found %d problem(s):\n", total)
 
 		if len(metaProblems) > 0 {
 			fmt.Fprintln(env.Stderr, "\n  "+config.MetaFileName+" broken:")
@@ -434,10 +505,10 @@ func runStart(args []string, env *Env) int {
 	// 4. Create runtime directory.
 	rtDir, err := createRuntimeDir(env.Workdir)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: runtime dir:", err)
+		fmt.Fprintln(env.Stderr, prefix+": runtime dir:", err)
 		return ExitIOError
 	}
-	if *verbose {
+	if verbose {
 		fmt.Fprintf(env.Stderr, "[verbose] runtime dir: %s\n", rtDir)
 	}
 	socketPath := filepath.Join(rtDir, "bridge.sock")
@@ -449,18 +520,18 @@ func runStart(args []string, env *Env) int {
 	// fresh, isolated dir per launch and remove it on exit.
 	sandboxTmp, err := os.MkdirTemp("", "omac-sandbox-tmp-")
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: sandbox temp dir:", err)
+		fmt.Fprintln(env.Stderr, prefix+": sandbox temp dir:", err)
 		return ExitIOError
 	}
 	defer os.RemoveAll(sandboxTmp)
-	if *verbose {
+	if verbose {
 		fmt.Fprintf(env.Stderr, "[verbose] sandbox TMPDIR: %s\n", sandboxTmp)
 	}
 
 	// 5. Spawn sidecars.
 	sup := supervisor.New(lc.Facade.BaseEnvPassthrough)
 	defer func() {
-		if !*keepRunning {
+		if !keepRunning {
 			sup.ShutdownAll(5 * time.Second)
 		}
 	}()
@@ -487,7 +558,7 @@ func runStart(args []string, env *Env) int {
 	defer cancel()
 	running, err := sup.StartAll(ctx, specs)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start:", err)
+		fmt.Fprintln(env.Stderr, prefix+":", err)
 		return ExitSidecarHealthcheckFail
 	}
 
@@ -528,12 +599,12 @@ func runStart(args []string, env *Env) int {
 		env.Version,
 	)
 	if err := f.Start(ctx); err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: facade:", err)
+		fmt.Fprintln(env.Stderr, prefix+": facade:", err)
 		return ExitIOError
 	}
 	defer f.Close()
 	tcpPort := f.TCPPort()
-	if *verbose {
+	if verbose {
 		fmt.Fprintf(env.Stderr, "[verbose] facade listening on %s and 127.0.0.1:%d (%d route(s))\n",
 			socketPath, tcpPort, len(routes))
 	}
@@ -543,7 +614,7 @@ func runStart(args []string, env *Env) int {
 	// restart (mirrors serve). Non-fatal if it can't bind.
 	reloader := &startReloader{
 		env: env, facade: f, sup: sup, ctx: ctx,
-		rtDir: rtDir, socket: socketPath, tcpPort: tcpPort, verbose: *verbose,
+		rtDir: rtDir, socket: socketPath, tcpPort: tcpPort, verbose: verbose,
 		mounted: map[string]string{},
 	}
 	for i, a := range armed {
@@ -551,7 +622,7 @@ func runStart(args []string, env *Env) int {
 	}
 	controlURL, closeControl, controlOK := startControlPlane(reloader)
 	defer closeControl()
-	if controlOK && *verbose {
+	if controlOK && verbose {
 		fmt.Fprintf(env.Stderr, "[verbose] control plane: %s\n", controlURL)
 	}
 
@@ -560,13 +631,13 @@ func runStart(args []string, env *Env) int {
 	// Resolve the inner command for the selected harness: an explicit
 	// --inner override wins, else the profile's inner_cmd, else the
 	// harness's default InnerCmd (config.Harness.ResolveInnerCmd).
-	inner := harness.ResolveInnerCmd(prof.InnerCmd, *innerCmdOverride)
+	inner := harness.ResolveInnerCmd(prof.InnerCmd, innerCmdOverride)
 	if len(innerArgs) > 0 {
 		inner = append(inner, innerArgs...)
 	}
 
 	var argv []string
-	if *noSandbox {
+	if noSandbox {
 		argv = inner
 	} else {
 		argv, err = sandbox.Expand(prof, sandbox.Inputs{
@@ -578,7 +649,7 @@ func runStart(args []string, env *Env) int {
 			TmpDir:   sandboxTmp,
 		})
 		if err != nil {
-			fmt.Fprintln(env.Stderr, "omac start: sandbox argv:", err)
+			fmt.Fprintln(env.Stderr, prefix+": sandbox argv:", err)
 			return ExitConfigInvalid
 		}
 		// Whitelist the control-plane port into the sandbox so the inner
@@ -590,7 +661,7 @@ func runStart(args []string, env *Env) int {
 			}
 		}
 	}
-	if *verbose {
+	if verbose {
 		fmt.Fprintf(env.Stderr, "[verbose] sandbox argv: %v\n", argv)
 	}
 
@@ -635,7 +706,7 @@ func runStart(args []string, env *Env) int {
 
 	code, err := sandbox.ExecWithReady(argv, extra, nil)
 	if err != nil {
-		fmt.Fprintln(env.Stderr, "omac start: exec:", err)
+		fmt.Fprintln(env.Stderr, prefix+": exec:", err)
 		return ExitSandboxAbnormal
 	}
 	return code
