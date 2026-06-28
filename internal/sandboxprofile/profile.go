@@ -28,6 +28,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -87,6 +88,15 @@ type Filesystem struct {
 	Allow []string `json:"allow,omitempty"` // read+write
 	Read  []string `json:"read,omitempty"`  // read-only
 	Write []string `json:"write,omitempty"` // write-only
+	// Deny carves holes out of the granted trees: matching paths are
+	// masked (denied read+write) even when an allow/read/write grant
+	// would otherwise expose them. Two entry forms are supported:
+	//   - a path (contains a separator, ~ or $VAR), e.g. "~/.env" or
+	//     "./config/prod.env": expanded and denied at that exact path;
+	//   - a bare basename glob (no separator), e.g. ".env" or "*.key":
+	//     denied wherever that filename appears inside a granted tree,
+	//     the current working directory included.
+	Deny []string `json:"deny,omitempty"`
 	// OverrideDeny removes entries from the built-in protected-path
 	// deny set (Baseline.ProtectedPaths). It does not grant access by
 	// itself; a matching allow/read/write grant is still required.
@@ -245,5 +255,31 @@ func (p *Profile) Validate() error {
 			return fmt.Errorf("sandbox profile: environment.allow_vars contains an empty entry")
 		}
 	}
+	for _, d := range p.Filesystem.Deny {
+		if strings.TrimSpace(d) == "" {
+			return fmt.Errorf("sandbox profile: filesystem.deny contains an empty entry")
+		}
+		// A basename-glob entry must be a valid pattern so a typo like
+		// "[" fails loudly here rather than silently denying nothing.
+		if IsBasenameGlob(d) {
+			if _, err := filepath.Match(d, "probe"); err != nil {
+				return fmt.Errorf("sandbox profile: filesystem.deny %q is not a valid glob: %w", d, err)
+			}
+		}
+	}
 	return nil
+}
+
+// IsBasenameGlob reports whether a filesystem.deny entry is a bare
+// filename pattern (matched in any granted directory) rather than an
+// explicit path. Entries with a path separator, or a leading ~ or $
+// (which expand to a path), are treated as explicit paths.
+func IsBasenameGlob(entry string) bool {
+	if strings.ContainsRune(entry, '/') {
+		return false
+	}
+	if strings.HasPrefix(entry, "~") || strings.HasPrefix(entry, "$") {
+		return false
+	}
+	return true
 }
