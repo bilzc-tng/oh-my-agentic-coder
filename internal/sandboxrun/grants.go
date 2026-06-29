@@ -6,6 +6,7 @@
 package sandboxrun
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,6 +42,10 @@ type Grants struct {
 	// need explicit AF_UNIX connect allowance on macOS.
 	UnixSockets []string
 
+	// UnixSocketDirs (from --allow-unix-dir) allow AF_UNIX connect to any
+	// socket under each dir (subpath rule), for dynamic socket names.
+	UnixSocketDirs []string
+
 	Enforcement string // kernel|env-only
 }
 
@@ -62,6 +67,21 @@ func ResolveGrants(p *sandboxprofile.Profile, workdir string, notices io.Writer)
 	if err != nil {
 		return nil, err
 	}
+
+	// Expand but don't existence-filter: the daemon may create the dir
+	// after launch. Also appended to allow so the socket files can be opened.
+	var unixDirs []string
+	for _, raw := range p.Filesystem.AllowUnixDir {
+		abs, expErr := sandboxprofile.ExpandPath(raw)
+		if expErr != nil {
+			if errors.Is(expErr, sandboxprofile.ErrEmptyExpansion) {
+				continue
+			}
+			return nil, fmt.Errorf("allow_unix_dir %q: %w", raw, expErr)
+		}
+		unixDirs = append(unixDirs, abs)
+	}
+	allow = append(allow, unixDirs...)
 
 	// Explicit (non-baseline) grants are the roots a basename-glob deny
 	// scans. Computed before the baseline-merged read/write so a deny
@@ -105,6 +125,7 @@ func ResolveGrants(p *sandboxprofile.Profile, workdir string, notices io.Writer)
 		ListenPorts:     dedupeInts(p.Network.ListenPort),
 		AllowTCPConnect: dedupeInts(p.Network.AllowTCPConnect),
 		OpenPorts:       dedupeInts(p.Network.OpenPort),
+		UnixSocketDirs:  dedupe(unixDirs),
 		Enforcement:     p.Network.EffectiveEnforcement(),
 	}
 
