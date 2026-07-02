@@ -134,48 +134,8 @@ func kernelVersionString() string {
 	return strings.TrimSpace(string(data))
 }
 
-// resolveInnerBinaryDirs resolves the inner command's executable on the
-// host PATH and returns the directories that must be granted for it to be
-// reachable inside the namespace:
-//
-//   - the directory of the PATH entry itself, which is frequently a symlink
-//     or shim (e.g. ~/.bun/bin/opencode, a mise/asdf shim). stage2 re-runs
-//     LookPath inside the namespace, so this dir must be mounted and on PATH
-//     or the lookup fails even when the real binary is present elsewhere.
-//   - the directory of its symlink-resolved real file (e.g.
-//     ~/.bun/install/.../opencode-ai/bin/opencode.exe), so the link target
-//     and its sibling files (shared libs, node runtime) are reachable.
-//
-// Granting only the resolved dir (the historical behavior) left the shim on
-// PATH unmounted, breaking version-manager installs like bun where the
-// PATH entry and the real binary live in different trees. It runs on the
-// supervisor (outside the namespace), so the lookup sees the user's real
-// PATH — the same resolution `which opencode` performs. Directories already
-// covered by the baseline (e.g. /usr/bin) are harmless: bwrap re-binding a
-// path that a parent bind already covers is idempotent. (BuildBwrapArgv's
-// dedupe only drops exact-duplicate path strings, not child-of-parent
-// overlaps.) Returns nil when the command cannot be found or resolved.
-func resolveInnerBinaryDirs(innerArgv []string) []string {
-	if len(innerArgv) == 0 || innerArgv[0] == "" {
-		return nil
-	}
-	// LookPath handles both bare PATH names and explicit (absolute or
-	// relative) paths, returning an error when nothing resolves.
-	resolved, err := exec.LookPath(innerArgv[0])
-	if err != nil {
-		return nil
-	}
-	if abs, aerr := filepath.Abs(resolved); aerr == nil {
-		resolved = abs
-	}
-	dirs := []string{filepath.Dir(resolved)}
-	if real, rerr := filepath.EvalSymlinks(resolved); rerr == nil {
-		if d := filepath.Dir(real); d != dirs[0] {
-			dirs = append(dirs, d)
-		}
-	}
-	return dirs
-}
+// resolveInnerBinaryDirs, resolveInnerBinaryPath, shebangInterpreter,
+// and resolveInterpreterDirs live in resolve_binary.go (platform-neutral).
 
 func firstLine(b []byte) string {
 	s := strings.TrimSpace(string(b))
@@ -238,9 +198,22 @@ func BuildChildArgv(g *Grants, innerArgv []string) ([]string, error) {
 	// BuildBwrapArgv's dedupe drops only exact-duplicate paths, not overlaps).
 	gz.ReadPaths = append(gz.ReadPaths, resolveInnerBinaryDirs(innerArgv)...)
 
+	// Rewrite argv[0] to the symlink-resolved real path so stage2 execs
+	// the real binary directly instead of following a symlink chain inside
+	// the sandbox. This avoids granting read access to intermediate
+	// directories in the chain (e.g. ~/.codex/packages/standalone/current/
+	// when ~/.local/bin/codex -> ~/.codex/.../current/bin/codex ->
+	// ~/.codex/.../releases/.../bin/codex). Only the binary's final
+	// directory is granted (via resolveInnerBinaryDirs above).
+	resolvedArgv := make([]string, len(innerArgv))
+	copy(resolvedArgv, innerArgv)
+	if p := resolveInnerBinaryPath(innerArgv); p != "" {
+		resolvedArgv[0] = p
+	}
+
 	stage2 := []string{self, "sandbox", "stage2"}
 	stage2 = append(stage2, Stage2Args(&gz)...)
 	stage2 = append(stage2, "--")
-	stage2 = append(stage2, innerArgv...)
+	stage2 = append(stage2, resolvedArgv...)
 	return BuildBwrapArgv(&gz, stage2)
 }
