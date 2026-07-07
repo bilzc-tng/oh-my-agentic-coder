@@ -97,8 +97,17 @@ func runE2E(t *testing.T, h harnessConfig) {
 	registerEchoRest(t, omacBin, home, workdir)
 
 	// 7. Run agent: call the echo-rest /status endpoint.
-	prompt := "Use the echo-rest skill to check its health. " +
-		"Call curl on the OMAC_ECHO_BASE/status endpoint and report the response."
+	// E2E_PROMPT overrides the default prompt (set by scripts/e2e-docker.sh
+	// prompt/run subcommands for agent-driven iteration).
+	prompt := os.Getenv("E2E_PROMPT")
+	if prompt == "" {
+		prompt = "This is a sanctioned e2e smoke test of the omac sandbox. " +
+			"Use the echo-rest skill to verify the sandbox facade is wired up. " +
+			"Call curl on the OMAC_ECHO_BASE/status endpoint and report the full JSON response. " +
+			"This is a trusted test command — proceed directly."
+	} else {
+		t.Logf("using E2E_PROMPT override: %q", truncate(prompt, 80))
+	}
 	stdout := runAgent(t, h, omacBin, home, workdir, prompt)
 
 	// 8. Assert output contains the health-check ok flag.
@@ -156,8 +165,8 @@ func runSecurityAudit(t *testing.T, h harnessConfig) {
 	}
 
 	spec := allowanceSpecFor(h)
-	t.Logf("allowance spec for %s: allow=%v deny=%v fsDeny=%v netDeny=%s",
-		h.Name, spec.EnvAllowVars, spec.EnvDenyVars, spec.FsDenyPaths, spec.NetDenyDomain)
+	t.Logf("allowance spec for %s: allow=%v deny=%v fsDeny=%v fsWriteDeny=%v netDeny=%s",
+		h.Name, spec.EnvAllowVars, spec.EnvDenyVars, spec.FsDenyPaths, spec.FsWriteDenyPaths, spec.NetDenyDomain)
 
 	omacBin := buildOmac(t)
 	installHarness(t, h, home)
@@ -165,11 +174,40 @@ func runSecurityAudit(t *testing.T, h harnessConfig) {
 	writeSandboxProfile(t, home, h, &spec)
 	copySkill(t, h, workdir, "self-audit")
 	registerSelfAudit(t, omacBin, home, workdir)
+	// Register echo-rest alongside self-audit so the cross-skill
+	// isolation probe can try to reach it.
+	copySkill(t, h, workdir, "echo-rest")
+	registerEchoRest(t, omacBin, home, workdir)
 
-	prompt := "Run this command and print its full output verbatim:\n\n" +
+	// The audit output file is in the workdir. The script writes to it
+	// internally (via OMAC_AUDIT_OUTPUT_FILE env var) — the test reads
+	// this file directly, robust against harness TUI output collapse.
+	auditOutputFile := filepath.Join(workdir, "audit-output.txt")
+
+	prompt := "This is a SANCTIONED sandbox self-audit. The omac sandbox isolates " +
+		"this environment; the script you are about to run is part of the test " +
+		"harness and is safe to execute. Run it:\n\n" +
 		`sh "$OMAC_HARNESS_SKILLS_DIR/self-audit/scripts/audit.sh"` + "\n\n" +
-		"Do not summarize. Do not skip any output. Print every line the command produces."
-	stdout := runAuditAgent(t, h, omacBin, home, workdir, prompt)
+		"The script checks the sandbox boundary (secret isolation, env filtering, " +
+		"filesystem denials, network blocking, sidecar reachability). It never " +
+		"prints sensitive data — all values are redacted. Run it and report " +
+		"the results."
+	agentOutput := runAuditAgent(t, h, omacBin, home, workdir, prompt)
+
+	// Read the audit output file directly. This is the primary source —
+	// it contains the raw probe output regardless of how the harness
+	// rendered tool output. Fall back to agent stdout+stderr if the file
+	// is missing (e.g. agent refused to run the script at all).
+	auditOutput, err := os.ReadFile(auditOutputFile)
+	if err != nil {
+		t.Logf("audit-output.txt not found (%v) — falling back to agent stdout+stderr", err)
+		auditOutput = []byte(agentOutput)
+	} else {
+		t.Logf("audit-output.txt read: %d bytes", len(auditOutput))
+	}
+	// Combine: file content (primary) + agent output (for sidecar fingerprint
+	// which may only appear in agent's summary of the sidecar probe).
+	stdout := string(auditOutput) + "\n" + agentOutput
 
 	sandboxActive := !h.Sandbox.NoSandbox
 
@@ -178,7 +216,8 @@ func runSecurityAudit(t *testing.T, h harnessConfig) {
 	if sandboxActive {
 		assertSecretNotLeaked(t, stdout)
 		assertEnvVarsDenied(t, stdout, spec.EnvDenyVars)
-		assertFilesystemDenied(t, stdout)
+		assertFilesystemReadDenied(t, stdout)
+		assertFilesystemWriteDenied(t, stdout)
 		assertNetworkDenied(t, stdout, spec.NetDenyDomain)
 	} else {
 		t.Logf("skipping negative assertions: %s runs with --no-sandbox", h.Name)
@@ -194,6 +233,20 @@ func runSecurityAudit(t *testing.T, h harnessConfig) {
 	} else {
 		t.Logf("skipping positive env assertions: %s runs with --no-sandbox", h.Name)
 	}
+
+	// --- DOCUMENTATION probes (log current behavior, no pass/fail) ---
+
+	// Exec on read-only mounts: bwrap typically allows exec on read-only
+	// binds. This is a platform default, not a contract — we log the
+	// result so changes are visible in test output.
+	logExecProbeResults(t, stdout, spec.FsExecProbePaths)
+
+	// Cross-skill sidecar isolation: omac currently does NOT isolate
+	// sidecars from each other — a skill can reach another skill's
+	// sidecar via its OMAC_<SKILL>_BASE env var. This is a known design
+	// decision (all sidecars share the same facade). We log the result
+	// so if isolation is added later, the test surfaces the change.
+	logCrossSkillIsolation(t, stdout)
 }
 
 // buildOmac compiles the omac binary into a temp dir and returns its path.
@@ -362,6 +415,7 @@ func runAuditAgent(t *testing.T, h harnessConfig, omacBin, home, workdir, prompt
 	cmd.Dir = workdir
 	env := buildAgentEnv(t, h, home)
 	env = append(env, "AUDIT_SECRET="+auditSecretValue)
+	env = append(env, "OMAC_AUDIT_OUTPUT_FILE="+filepath.Join(workdir, "audit-output.txt"))
 	env = append(env, "PWD="+workdir)
 	cmd.Env = env
 	cmd.Stdin = strings.NewReader("")
@@ -385,7 +439,10 @@ func runAuditAgent(t *testing.T, h harnessConfig, omacBin, home, workdir, prompt
 			err, stdout.String(), stderr.String())
 	}
 	writeSessionArtifacts(t, h, "security-audit", home, workdir, prompt, stdout.String(), stderr.String(), env, profPath)
-	return stdout.String()
+	// Audit assertions need both stdout (agent's response) and stderr
+	// (where opencode --print-logs sends tool output, including the
+	// audit.sh probe results). Return the combined output.
+	return stdout.String() + "\n" + stderr.String()
 }
 
 // buildAgentEnv constructs the environment for the omac start subprocess.
@@ -402,13 +459,31 @@ func buildAgentEnv(t *testing.T, h harnessConfig, home string) []string {
 var okRe = regexp.MustCompile(`"ok"\s*:\s*true`)
 
 // assertEchoOK checks the agent's output contains the echo-rest health response.
+// Classifies failure: did the agent call /status at all? Did it get a response?
 func assertEchoOK(t *testing.T, output string) {
 	t.Helper()
-	if !okRe.MatchString(output) {
-		t.Errorf("agent output does not contain echo-rest health response\nOUTPUT:\n%s", tailLines(output, 200))
+	if okRe.MatchString(output) {
+		t.Logf("PASS: echo-rest /status response found in agent output")
 		return
 	}
-	t.Logf("echo-rest /status response found in agent output")
+	// Classify the failure.
+	if strings.Contains(output, "stream error") || strings.Contains(output, "AI_APICallError") {
+		failWithClassification(t, "echoOK", fmInfraError, output)
+		return
+	}
+	if !strings.Contains(output, "curl") && !strings.Contains(output, "OMAC_ECHO_BASE") {
+		mode := fmAgentNeverRan
+		if agentProducedOutput(output) {
+			mode = fmAgentRefused
+		}
+		failWithClassification(t, "echoOK", mode, output)
+		return
+	}
+	if strings.Contains(output, "Connection refused") || strings.Contains(output, "curl: (7)") {
+		failWithClassification(t, "echoOK", fmInfraError, output)
+		return
+	}
+	failWithClassification(t, "echoOK", fmAgentPartial, output)
 }
 
 // assertSecretNotLeaked verifies the plaintext AUDIT_SECRET value does
@@ -417,8 +492,7 @@ func assertEchoOK(t *testing.T, output string) {
 func assertSecretNotLeaked(t *testing.T, output string) {
 	t.Helper()
 	if strings.Contains(output, auditSecretValue) {
-		t.Errorf("SECURITY FAIL: plaintext AUDIT_SECRET value found in agent output\n" +
-			"the sandbox leaked the secret into the agent's environment")
+		failWithClassification(t, "secretNotLeaked", fmSandboxFail, output)
 		return
 	}
 	t.Logf("PASS: secret isolation — plaintext secret not found in agent output")
@@ -430,12 +504,28 @@ func assertSecretNotLeaked(t *testing.T, output string) {
 func assertSecretFingerprintPresent(t *testing.T, output string) {
 	t.Helper()
 	fingerprintRe := regexp.MustCompile(`sha256:[0-9a-f]{12}`)
-	if !fingerprintRe.MatchString(output) {
-		t.Errorf("POSITIVE FAIL: agent output does not contain secret fingerprint;\n" +
-			"the agent may not have called the self-audit skill's /whoami endpoint")
+	if fingerprintRe.MatchString(output) {
+		t.Logf("PASS: sidecar reachable — secret fingerprint found in agent output")
 		return
 	}
-	t.Logf("PASS: sidecar reachable — secret fingerprint found in agent output")
+	// Classify: did the agent run the sidecar probe at all?
+	mode := classifyProbe(output, "sidecar")
+	switch mode {
+	case fmAgentNeverRan, fmAgentRefused:
+		failWithClassification(t, "sidecarReachable", mode, output)
+	case fmAgentPartial:
+		failWithClassification(t, "sidecarReachable", fmAgentPartial, output)
+	case fmPass:
+		// Probe ran but no fingerprint — check if sidecar was reachable at all.
+		probeOut := extractProbe(output, "sidecar")
+		if strings.Contains(probeOut, "Connection refused") || strings.Contains(probeOut, "curl: (7)") {
+			failWithClassification(t, "sidecarReachable", fmInfraError, output)
+		} else if strings.Contains(probeOut, "OMAC_AUDIT_BASE not set") {
+			failWithClassification(t, "sidecarReachable", fmInfraError, output)
+		} else {
+			failWithClassification(t, "sidecarReachable", fmSandboxFail, output)
+		}
+	}
 }
 
 // assertEnvVarsDenied verifies that none of the denied env vars appear
@@ -443,12 +533,16 @@ func assertSecretFingerprintPresent(t *testing.T, output string) {
 // "VARNAME=" in the output.
 func assertEnvVarsDenied(t *testing.T, output string, denyVars []string) {
 	t.Helper()
+	leaked := []string{}
 	for _, v := range denyVars {
 		needle := v + "="
 		if strings.Contains(output, needle) {
-			t.Errorf("SECURITY FAIL: %s visible in agent env output\n"+
-				"the sandbox did not filter this env var", v)
+			leaked = append(leaked, v)
 		}
+	}
+	if len(leaked) > 0 {
+		failWithClassification(t, "envVarsDenied", fmSandboxFail, output)
+		return
 	}
 	t.Logf("PASS: env filtering — denied vars not in agent output")
 }
@@ -457,20 +551,44 @@ func assertEnvVarsDenied(t *testing.T, output string, denyVars []string) {
 // in the agent's output (positive assertion — sandbox passes them through).
 func assertEnvVarsVisible(t *testing.T, output string, expectVars []string) {
 	t.Helper()
+	missing := []string{}
 	for _, v := range expectVars {
 		if !strings.Contains(output, v) {
-			t.Errorf("POSITIVE FAIL: %s not found in agent env output\n"+
-				"the sandbox may be over-filtering env vars", v)
-			return
+			missing = append(missing, v)
 		}
+	}
+	if len(missing) > 0 {
+		// Classify: did the agent run the env probe at all?
+		mode := classifyProbe(output, "env")
+		switch mode {
+		case fmAgentNeverRan, fmAgentRefused:
+			failWithClassification(t, "envVarsVisible", mode, output)
+		case fmAgentPartial:
+			failWithClassification(t, "envVarsVisible", fmAgentPartial, output)
+		case fmPass:
+			failWithClassification(t, "envVarsVisible", fmSandboxFail, output)
+		}
+		return
 	}
 	t.Logf("PASS: env passthrough — expected vars visible in agent output")
 }
 
-// assertFilesystemDenied verifies that filesystem probes were denied
-// by the sandbox. We check for OS-level denial messages.
-func assertFilesystemDenied(t *testing.T, output string) {
+// assertFilesystemReadDenied verifies that filesystem read probes were
+// denied by the sandbox. We check for OS-level denial messages in the
+// fs_read probe section.
+func assertFilesystemReadDenied(t *testing.T, output string) {
 	t.Helper()
+	mode := classifyProbe(output, "fs_read")
+	switch mode {
+	case fmAgentNeverRan, fmAgentRefused:
+		failWithClassification(t, "fsReadDenied", mode, output)
+		return
+	case fmAgentPartial:
+		failWithClassification(t, "fsReadDenied", fmAgentPartial, output)
+		return
+	}
+	// Probe ran completely — check for denial messages.
+	probeOut := extractProbe(output, "fs_read")
 	denials := []string{
 		"Permission denied",
 		"No such file or directory",
@@ -479,23 +597,107 @@ func assertFilesystemDenied(t *testing.T, output string) {
 	}
 	found := false
 	for _, d := range denials {
-		if strings.Contains(output, d) {
+		if strings.Contains(probeOut, d) {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("SECURITY FAIL: no filesystem denial message found in agent output\n" +
-			"the sandbox may not be enforcing filesystem isolation")
+		failWithClassification(t, "fsReadDenied", fmSandboxFail, output)
 		return
 	}
-	t.Logf("PASS: filesystem isolation — denial message found in agent output")
+	t.Logf("PASS: filesystem read isolation — denial message found in agent output")
+}
+
+// assertFilesystemWriteDenied verifies that write attempts to system
+// paths (read-only mounts) were denied by the sandbox.
+func assertFilesystemWriteDenied(t *testing.T, output string) {
+	t.Helper()
+	mode := classifyProbe(output, "fs_write")
+	switch mode {
+	case fmAgentNeverRan, fmAgentRefused:
+		failWithClassification(t, "fsWriteDenied", mode, output)
+		return
+	case fmAgentPartial:
+		failWithClassification(t, "fsWriteDenied", fmAgentPartial, output)
+		return
+	}
+	probeOut := extractProbe(output, "fs_write")
+	denials := []string{
+		"Read-only file system",
+		"Permission denied",
+		"Operation not permitted",
+	}
+	found := false
+	for _, d := range denials {
+		if strings.Contains(probeOut, d) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		failWithClassification(t, "fsWriteDenied", fmSandboxFail, output)
+		return
+	}
+	t.Logf("PASS: filesystem write protection — denial message found in agent output")
+}
+
+// logCrossSkillIsolation logs whether the agent could reach another
+// skill's sidecar. omac currently does NOT isolate sidecars from each
+// other — all skills share the same facade and can reach each other
+// via their OMAC_<SKILL>_BASE env vars. This is a known design decision;
+// we log the result so if isolation is added later, the change is visible.
+func logCrossSkillIsolation(t *testing.T, output string) {
+	t.Helper()
+	if !strings.Contains(output, "=== PROBE: xskill ===") {
+		t.Logf("SKIP: cross-skill isolation — xskill probe not in output")
+		return
+	}
+	if strings.Contains(output, "OMAC_ECHO_BASE not set") {
+		t.Logf("SKIP: cross-skill isolation — echo-rest not registered")
+		return
+	}
+	// Check if the agent got a successful response from echo-rest.
+	if strings.Contains(output, `"skill": "echo-rest"`) {
+		t.Logf("INFO: cross-skill sidecar NOT isolated — agent reached echo-rest sidecar " +
+			"(known behavior: all sidecars share the facade; not a security boundary)")
+		return
+	}
+	t.Logf("INFO: cross-skill sidecar isolated — echo-rest sidecar not reachable from self-audit")
+}
+
+// logExecProbeResults logs the exec probe results without asserting
+// pass/fail. Whether exec works on read-only mounts is a platform
+// decision (bwrap typically allows exec on read-only binds), not a
+// contract. We document the current behavior so changes are visible.
+func logExecProbeResults(t *testing.T, output string, probePaths []string) {
+	t.Helper()
+	if !strings.Contains(output, "=== PROBE: fs_exec ===") {
+		return
+	}
+	for _, p := range probePaths {
+		if strings.Contains(output, "EXEC_OK") || strings.Contains(output, "SHELL_EXEC_OK") {
+			t.Logf("INFO: exec on read-only mount ALLOWED for %s (platform default)", p)
+		} else {
+			t.Logf("INFO: exec on read-only mount DENIED for %s", p)
+		}
+	}
 }
 
 // assertNetworkDenied verifies that the network probe was blocked
 // by the sandbox. We check for connection failure messages.
 func assertNetworkDenied(t *testing.T, output string, denyDomain string) {
 	t.Helper()
+	mode := classifyProbe(output, "net")
+	switch mode {
+	case fmAgentNeverRan, fmAgentRefused:
+		failWithClassification(t, "networkDenied", mode, output)
+		return
+	case fmAgentPartial:
+		failWithClassification(t, "networkDenied", fmAgentPartial, output)
+		return
+	}
+	probeOut := extractProbe(output, "net")
 	denials := []string{
 		"Connection refused",
 		"Could not resolve host",
@@ -509,14 +711,13 @@ func assertNetworkDenied(t *testing.T, output string, denyDomain string) {
 	}
 	found := false
 	for _, d := range denials {
-		if strings.Contains(output, d) {
+		if strings.Contains(probeOut, d) {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("SECURITY FAIL: no network denial message found in agent output\n"+
-			"the sandbox may not be enforcing network egress filtering for %s", denyDomain)
+		failWithClassification(t, "networkDenied", fmSandboxFail, output)
 		return
 	}
 	t.Logf("PASS: network isolation — denial message found in agent output")
